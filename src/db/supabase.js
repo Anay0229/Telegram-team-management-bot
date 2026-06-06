@@ -184,6 +184,21 @@ async function getTaskByAssignmentMsgId(assignmentMsgId) {
   return data[0] || null;
 }
 
+// Records the latest file an editor submitted for a task, so completion
+// notifications can confirm a deliverable was received.
+async function setTaskDeliverable(taskId, { fileId, fileType, fileName }) {
+  const { error } = await supabase
+    .from('tasks')
+    .update({
+      deliverable_file_id: fileId,
+      deliverable_file_type: fileType,
+      deliverable_file_name: fileName || null,
+      deliverable_uploaded_at: new Date().toISOString(),
+    })
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
 // Finds active tasks by main-work description OR client name — used by the mark command.
 async function findActiveTasksByProjectName(name) {
   const { data: byWork, error: e1 } = await supabase
@@ -458,6 +473,7 @@ module.exports = {
   getTaskById,
   updateTaskAssignmentMsgId,
   getTaskByAssignmentMsgId,
+  setTaskDeliverable,
   findActiveTasksByProjectName,
   getActiveTasksForEditor,
   getMostRecentActiveTaskForEditor,

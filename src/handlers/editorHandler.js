@@ -1,5 +1,5 @@
 const db = require('../db/supabase');
-const { sendMessage, sendToOwners } = require('../services/telegram');
+const { sendMessage, sendToOwners, sendFileToOwners } = require('../services/telegram');
 const fmt = require('../services/formatters');
 const config = require('../config');
 
@@ -157,21 +157,109 @@ async function handleStatusUpdate(editor, cmd, quotedMsgId) {
     return;
   }
 
-  await db.updateTaskStatus(task.id, status);
-  const title = fmt.taskTitle(task);
-
   if (status === 'in_progress') {
-    await sendMessage(editor.telegram_id, `✅ Got it! *${title}* marked as In Progress.`);
-  } else if (status === 'completed') {
-    await sendMessage(editor.telegram_id, `🎉 Great work! *${title}* marked as Completed.`);
-    await sendToOwners(
-      `✅ *Task Completed!*\n\n` +
-      `Employee: *${editor.name}*\n` +
-      `Task: *${title}*\n` +
-      `Type: ${fmt.fmtType(task.type)}\n` +
-      `Deadline was: ${fmt.fmtDeadline(task.deadline)}`
-    );
+    await db.updateTaskStatus(task.id, status);
+    await sendMessage(editor.telegram_id, `✅ Got it! *${fmt.taskTitle(task)}* marked as In Progress.`);
+    return;
+  }
+
+  if (status === 'completed') {
+    await completeTask(editor, task);
+    await sendMessage(editor.telegram_id, `🎉 Great work! *${fmt.taskTitle(task)}* marked as Completed.`);
+    return;
   }
 }
 
-module.exports = { handleEditorMessage };
+// Marks a task completed and notifies the owners. Mentions the deliverable file
+// when one was submitted (it will already have been forwarded to the owners).
+// Shared by the "done" text command and the file-with-"done"-caption flow.
+async function completeTask(editor, task) {
+  await db.updateTaskStatus(task.id, 'completed');
+  const title = fmt.taskTitle(task);
+  await sendToOwners(
+    `✅ *Task Completed!*\n\n` +
+    `Employee: *${editor.name}*\n` +
+    `Task: *${title}*\n` +
+    `Type: ${fmt.fmtType(task.type)}\n` +
+    `Deadline was: ${fmt.fmtDeadline(task.deadline)}` +
+    (task.deliverable_file_id ? `\n\n📎 Final file shared above.` : ``)
+  );
+}
+
+// ── File / deliverable uploads ──────────────────────────────────────────────
+// Any file an editor sends is forwarded to the owners. When the file is a reply
+// to an assignment message (or its caption names a task), it's linked to that
+// task and recorded as the deliverable. A caption of "done" both submits the
+// file and marks the task completed in one step.
+async function handleEditorFile(editor, file, quotedMsgId) {
+  const { fileId, fileType, fileName, caption } = file;
+
+  // A caption of "done"/"completed" (optionally "done 2") means: submit AND finish.
+  const cmd = parseStatusCommand(caption || '');
+  const wantsComplete = !!cmd && cmd.status === 'completed';
+  const captionTaskNumber = cmd ? cmd.taskNumber : null;
+  // Treat the caption as a free-text note only when it isn't a status command.
+  const note = cmd ? null : (caption || '').trim();
+
+  // Link the file to a task: quoted assignment msg → number in caption → sole task.
+  const resolved = await resolveTargetTask(editor, quotedMsgId, captionTaskNumber);
+  const task = resolved.task || null;                       // present on success or already_done
+  const linkable = !!task && resolved.error !== 'already_done';
+  const title = task ? fmt.taskTitle(task) : null;
+
+  // 1) Always forward the file to the owners — the core requirement.
+  let ownerCaption = `📎 *File from ${editor.name}*`;
+  if (title) ownerCaption += `\n📋 Task: *${title}*`;
+  if (note) ownerCaption += `\n📝 _${note}_`;
+  if (wantsComplete && linkable) ownerCaption += `\n✅ Marked *Completed* by employee.`;
+  await sendFileToOwners({ fileId, fileType, caption: ownerCaption });
+
+  // 2) Record it as the task's deliverable (best-effort — column may be new).
+  if (linkable) {
+    try {
+      await db.setTaskDeliverable(task.id, { fileId, fileType, fileName });
+      task.deliverable_file_id = fileId; // so completeTask() mentions it
+    } catch (err) {
+      console.warn('[Editor] Could not store deliverable:', err.message);
+    }
+  }
+
+  // 3) If the caption said "done", complete the task too.
+  if (wantsComplete && linkable) {
+    await completeTask(editor, task);
+    await sendMessage(
+      editor.telegram_id,
+      `🎉 Got your file and forwarded it to the owners — *${title}* is now marked *Completed*. Great work!`
+    );
+    return;
+  }
+
+  // 4) Otherwise acknowledge the upload.
+  if (linkable) {
+    await sendMessage(
+      editor.telegram_id,
+      `📎 Got your file for *${title}* and forwarded it to the owners.\n` +
+      `↩️ Reply *done* to that task's message when it's finished.`
+    );
+    return;
+  }
+  if (task && resolved.error === 'already_done') {
+    await sendMessage(
+      editor.telegram_id,
+      `📎 Forwarded your file to the owners.\nℹ️ *${title}* is already completed.`
+    );
+    return;
+  }
+  // No task context — still forwarded, just not linked.
+  let msg = `📎 Forwarded your file to the owners.`;
+  if (resolved.error === 'ambiguous') {
+    msg += `\n💡 To attach it to a specific task, *reply to that task's assignment message* with the file.`;
+  } else if (resolved.error === 'none') {
+    msg += `\nℹ️ You have no active tasks right now, so I couldn't link it to one.`;
+  } else {
+    msg += `\n💡 Tip: reply to a task's assignment message with the file so I can link it.`;
+  }
+  await sendMessage(editor.telegram_id, msg);
+}
+
+module.exports = { handleEditorMessage, handleEditorFile };

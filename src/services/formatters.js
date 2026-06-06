@@ -78,6 +78,7 @@ function assignmentNotification(clientName, projectName, type, deadline, driveLi
     (note ? `\n📝 *Note from management:*\n_${note}_\n` : '') +
     `\n📁 *Drive Folder:* ${driveLink}\n\n` +
     `↩️ *Tip:* reply to *this* message with *started*, *done*, or *blocked [reason]* to update exactly this task.\n` +
+    `📎 When it's ready, reply here with the *file* — I'll forward it to the owners. Add caption *done* to finish in one step.\n` +
     `Type *help* for all commands.`
   );
 }
@@ -160,6 +161,7 @@ function helpMenu(isOwner) {
       `*[employee name] status*\n  → Drill-down on specific employee\n\n` +
       `*overdue*\n  → All tasks past deadline\n\n` +
       `*completed today*\n  → Tasks finished in last 24 hours\n\n` +
+      `*test reminders*\n  → Run the deadline checks right now and see what was sent\n\n` +
       `_All owners share these commands and get the same notifications._`
     );
   }
@@ -169,6 +171,7 @@ function helpMenu(isOwner) {
     `*started* / *started 2*\n  → Mark a task as In Progress\n\n` +
     `*done* / *done 2*\n  → Mark a task as Completed\n\n` +
     `*blocked [reason]* / *blocked 2 [reason]*\n  → Mark Blocked and alert the owners\n\n` +
+    `📎 *Send a file*\n  → Reply to a task's message with the file and I'll forward it to the owners. Caption it *done* to also mark the task Completed.\n\n` +
     `*my tasks*\n  → See all your active tasks (with numbers)\n\n` +
     `*send raw folder*\n  → Get Raw Files Drive link\n\n` +
     `*send final folder*\n  → Get Final Data Drive link\n\n` +

@@ -1,8 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const config = require('./config');
-const { bot } = require('./services/telegram');
-const { handleIncomingMessage } = require('./handlers/messageHandler');
+const { bot, extractFile } = require('./services/telegram');
+const { handleIncomingMessage, handleIncomingFile } = require('./handlers/messageHandler');
 const { startScheduler } = require('./jobs/scheduler');
 
 // ── Telegram bot events ───────────────────────────────────────────────────────
@@ -12,16 +12,28 @@ bot.on('polling_error', (err) => {
 });
 
 bot.on('message', async (msg) => {
-  // Only handle text messages in private chats
-  if (!msg.text || !msg.text.trim()) return;
+  // Only handle private chats
   if (msg.chat.type !== 'private') return;
 
   const chatId = String(msg.chat.id);
-  const text = msg.text;
 
   // If the sender replied to a previous message, capture that message ID so
   // handlers can pinpoint exactly which task the update refers to.
   const quotedMsgId = msg.reply_to_message?.message_id?.toString() || null;
+
+  // ── File / media message (document, photo, video, …) ─────────────────────────
+  const file = extractFile(msg);
+  if (file) {
+    console.log(`[FILE] From: ${chatId} | ${file.fileType}${file.fileName ? ' ' + file.fileName : ''}${msg.caption ? ' | caption: ' + msg.caption.slice(0, 40) : ''}${quotedMsgId ? ' | (quoted reply)' : ''}`);
+    handleIncomingFile(chatId, { ...file, caption: msg.caption || '' }, quotedMsgId).catch((err) => {
+      console.error('[Bot] Error handling file:', err);
+    });
+    return;
+  }
+
+  // ── Text message ─────────────────────────────────────────────────────────────
+  if (!msg.text || !msg.text.trim()) return;
+  const text = msg.text;
 
   console.log(`[MSG] From: ${chatId} | Body: ${text.slice(0, 80)}${quotedMsgId ? ' | (quoted reply)' : ''}`);
 

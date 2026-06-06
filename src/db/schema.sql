@@ -41,6 +41,10 @@ create table if not exists tasks (
   blocked_reason text,
   note          text,                    -- optional note from management, sent to the employee on assignment
   assignment_msg_id text,                -- Telegram message_id for reply-based task matching
+  deliverable_file_id   text,            -- Telegram file_id of the last file the editor submitted
+  deliverable_file_type text,            -- document | photo | video | audio | voice | animation | video_note
+  deliverable_file_name text,            -- original file name (when Telegram provides one)
+  deliverable_uploaded_at timestamptz,   -- when the deliverable file was received
   started_at    timestamptz,             -- set on first transition to in_progress
   deadline_notified_at timestamptz,      -- last past-deadline nudge timestamp
   created_at    timestamptz not null default now(),
@@ -58,6 +62,14 @@ create index if not exists tasks_client_id_idx   on tasks(client_id);
 --   alter table editors rename column whatsapp_number to telegram_id;
 --
 -- Then update each editor's telegram_id to their Telegram chat ID.
+
+-- ── Migration: editor file deliverables ───────────────────────────────────────
+-- If you already created the tasks table before file-upload support, run:
+--
+--   alter table tasks add column if not exists deliverable_file_id   text;
+--   alter table tasks add column if not exists deliverable_file_type text;
+--   alter table tasks add column if not exists deliverable_file_name text;
+--   alter table tasks add column if not exists deliverable_uploaded_at timestamptz;
 
 -- ── Seed example clients ──────────────────────────────────────────────────────
 

@@ -2,7 +2,7 @@ const config = require('../config');
 const db = require('../db/supabase');
 const { sendMessage } = require('../services/telegram');
 const { handleOwnerMessage } = require('./ownerHandler');
-const { handleEditorMessage } = require('./editorHandler');
+const { handleEditorMessage, handleEditorFile } = require('./editorHandler');
 
 /**
  * Entry point for every inbound Telegram message.
@@ -33,4 +33,25 @@ async function handleIncomingMessage(from, body, quotedMsgId) {
   );
 }
 
-module.exports = { handleIncomingMessage };
+/**
+ * Entry point for every inbound file/media message (document, photo, video, …).
+ * file is { fileId, fileType, fileName, caption } extracted from the Telegram message.
+ */
+async function handleIncomingFile(from, file, quotedMsgId) {
+  // Owners uploading files don't need their own files forwarded back to them.
+  if (config.isOwner(from)) return;
+
+  const editor = await db.getEditorByTelegramId(from);
+  if (editor) {
+    await handleEditorFile(editor, file, quotedMsgId);
+    return;
+  }
+
+  // Unknown sender — mirror the text path so they know to get registered.
+  await sendMessage(
+    from,
+    `👋 Hi! This is the Framex Originals team bot.\n\nYou are not registered in the system. Please contact your manager to get added.`
+  );
+}
+
+module.exports = { handleIncomingMessage, handleIncomingFile };
