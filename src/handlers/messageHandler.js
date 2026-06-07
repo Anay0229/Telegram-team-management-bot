@@ -15,7 +15,7 @@ async function handleIncomingMessage(from, body, quotedMsgId) {
 
   // ── Owner (any of the configured owners) ────────────────────────────────────
   if (config.isOwner(from)) {
-    await handleOwnerMessage(from, body);
+    await handleOwnerMessage(from, body, quotedMsgId);
     return;
   }
 

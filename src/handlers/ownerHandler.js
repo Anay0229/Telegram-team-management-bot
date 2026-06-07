@@ -2,7 +2,7 @@ const db = require('../db/supabase');
 const { sendMessage } = require('../services/telegram');
 const lb = require('../services/loadBalancer');
 const fmt = require('../services/formatters');
-const { parseDeadline, assignProject, changeTaskStatus } = require('../services/assignments');
+const { parseDeadline, assignProject, changeTaskStatus, requestChanges } = require('../services/assignments');
 const { sendDeadlineReminders, sendPastDeadlineEditorNudges, sendEscalationAlerts } = require('../jobs/scheduler');
 
 // Pending assignment confirmations, keyed by owner number so two owners can be
@@ -25,13 +25,28 @@ function resolveType(raw) {
   return TYPE_ALIASES[raw.toLowerCase().trim()] || null;
 }
 
-async function handleOwnerMessage(from, body) {
+async function handleOwnerMessage(from, body, quotedMsgId) {
   const text = body.trim().toLowerCase();
 
   // ── check if THIS owner is awaiting employee confirmation ────────────────────
   if (pendingAssignments.has(from)) {
     const resolved = await tryResolveConfirmation(from, body);
     if (resolved) return;
+  }
+
+  // ── reply to a forwarded deliverable file = request changes on that task ──────
+  if (quotedMsgId) {
+    let task = null;
+    try {
+      task = await db.getTaskByDeliverableOwnerMsg(from, quotedMsgId);
+    } catch (err) {
+      console.warn('[Owner] Deliverable-reply lookup failed:', err.message);
+    }
+    if (task) {
+      const notes = body.replace(/^(changes?|revisions?|revise|redo)\b\s*[:\-]?\s*/i, '').trim() || 'No details provided';
+      await requestChanges(task, notes, 'Telegram (reply to file)');
+      return;
+    }
   }
 
   // ── new project intake ────────────────────────────────────────────────────────
@@ -63,6 +78,21 @@ async function handleOwnerMessage(from, body) {
       return;
     }
     await handleOwnerMark(from, parsed);
+    return;
+  }
+
+  // ── changes [project/client] | [notes] (request a revision) ───────────────────
+  if (/^(changes?|revisions?|revise|redo)\b/i.test(text)) {
+    const parsed = parseChangesCommand(body);
+    if (!parsed) {
+      await sendMessage(
+        from,
+        `❌ *Invalid format.*\n\nUse:\nchanges [work or client] | [what to change]\n\nExample:\nchanges Brand Reel | fix the intro and redo color grade\n\n` +
+        `💡 Or just *reply to the file the editor sent* with the change notes.`
+      );
+      return;
+    }
+    await handleOwnerChanges(from, parsed);
     return;
   }
 
@@ -286,6 +316,40 @@ function parseOwnerMark(body) {
     }
   }
   return null;
+}
+
+// ── Change requests ──────────────────────────────────────────────────────────
+// Format: changes [work or client] | [what to change]
+function parseChangesCommand(body) {
+  const rest = body.replace(/^(changes?|revisions?|revise|redo)\b\s*:?\s*/i, '').trim();
+  const idx = rest.indexOf('|');
+  if (idx === -1) return null;
+  const project = rest.slice(0, idx).trim();
+  const notes = rest.slice(idx + 1).trim();
+  if (!project || !notes) return null;
+  return { project, notes };
+}
+
+async function handleOwnerChanges(from, { project, notes }) {
+  const matches = await db.findTasksByProjectNameAnyStatus(project);
+
+  if (!matches.length) {
+    await sendMessage(from, `❌ No task matching "${project}".`);
+    return;
+  }
+  if (matches.length > 1) {
+    const list = matches
+      .slice(0, 8)
+      .map((t, i) => `${i + 1}. *${fmt.taskTitle(t)}* — ${t.editors?.name || 'Unassigned'} (${fmt.fmtStatus(t.status)})`)
+      .join('\n');
+    await sendMessage(
+      from,
+      `⚠️ Multiple tasks match "${project}":\n\n${list}\n\nPlease use the full work description, or reply to the editor's file instead.`
+    );
+    return;
+  }
+
+  await requestChanges(matches[0], notes, 'Telegram');
 }
 
 async function handleOwnerMark(from, { project, status, reason }) {

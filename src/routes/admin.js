@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const db = require('../db/supabase');
 const fmt = require('../services/formatters');
-const { assignProject, changeTaskStatus, parseDeadline } = require('../services/assignments');
+const { assignProject, changeTaskStatus, parseDeadline, requestChanges } = require('../services/assignments');
 
 const router = express.Router();
 
@@ -79,6 +79,7 @@ function page(title, activeNav, body, flash = '') {
     ['/admin',             'Dashboard',  'dashboard'],
     ['/admin/assign',      'Assign Work','assign'],
     ['/admin/tasks',       'Tasks',      'tasks'],
+    ['/admin/changes',     'Changes',    'changes'],
     ['/admin/employees',   'Employees',  'employees'],
     ['/admin/performance', 'Performance','performance'],
     ['/admin/clients',     'Clients',    'clients'],
@@ -150,6 +151,7 @@ function page(title, activeNav, body, flash = '') {
     .badge.st-progress { background: #dbeafe; color: #1d4ed8; }
     .badge.st-blocked  { background: #fee2e2; color: #991b1b; }
     .badge.st-done     { background: #d1fae5; color: #065f46; }
+    .badge.st-changes  { background: #ffedd5; color: #9a3412; }
     .badge.on-time     { background: #d1fae5; color: #065f46; }
     .badge.late        { background: #fee2e2; color: #991b1b; }
     .badge.no-dl       { background: #f3f4f6; color: #6b7280; }
@@ -167,6 +169,10 @@ function page(title, activeNav, body, flash = '') {
     .role-checks { display: flex; gap: 16px; flex-wrap: wrap; padding: 10px 0 4px; }
     .role-checks label { flex-direction: row; align-items: center; gap: 7px; font-weight: 400; cursor: pointer; }
     .role-checks input[type=checkbox] { width: 15px; height: 15px; border: 1.5px solid #d1d5db; border-radius: 4px; padding: 0; cursor: pointer; accent-color: #6366f1; }
+    /* Changes tab */
+    .changes-form { display: flex; flex-direction: column; gap: 6px; min-width: 210px; }
+    .changes-form textarea { min-height: 46px; font-size: 0.8rem; padding: 6px 9px; }
+    .changes-form button { padding: 7px 14px; font-size: 0.8rem; align-self: flex-start; }
   </style>
 </head>
 <body>
@@ -219,6 +225,50 @@ function taskRow(task) {
     </td>
     <td>${statusBadge(task.status)}</td>
     <td>${statusForm(task)}</td>
+  </tr>`;
+}
+
+// ── Changes / Revisions helpers ─────────────────────────────────────────────────
+// Reopened revision rounds keep status 'in_progress' in the DB but read as
+// "Changes" here so the lifecycle (delivered → changes → done) is visible.
+function changeStatusBadge(task) {
+  if (task.status === 'completed') return statusBadge('completed');
+  if (task.revision_count > 0) return `<span class="badge st-changes">🔁 Changes · Rev ${task.revision_count}</span>`;
+  return statusBadge(task.status);
+}
+
+function fileRef(task) {
+  if (!task.deliverable_file_id) return '<span class="badge no-dl">No file</span>';
+  const name = task.deliverable_file_name || `(${task.deliverable_file_type || 'file'})`;
+  return `<div class="mono">📎 ${esc(name)}</div>
+    <div class="note">${esc(task.deliverable_file_type || '')}${task.deliverable_uploaded_at ? ' · ' + fmtDateTime(task.deliverable_uploaded_at) : ''}</div>`;
+}
+
+function changeRow(task) {
+  const employee = task.editors?.name || 'Unassigned';
+  const clientName = task.clients?.name;
+  const notCompleted = task.status !== 'completed';
+  const doneForm = notCompleted
+    ? `<form method="POST" action="/admin/changes/${task.id}/done" style="margin-top:6px">
+         <button class="ghost" type="submit">Mark Done</button>
+       </form>`
+    : '';
+  return `<tr>
+    <td>
+      ${clientName ? `<div class="client-tag">${esc(clientName)}</div>` : ''}
+      <strong>${esc(task.project_name)}</strong> ${typeBadge(task.type)}
+    </td>
+    <td>${esc(employee)}</td>
+    <td>${fileRef(task)}</td>
+    <td>${changeStatusBadge(task)}</td>
+    <td>${task.revision_notes ? `<div class="note">📝 ${esc(task.revision_notes)}</div>` : '<span class="badge no-dl">—</span>'}</td>
+    <td>
+      <form method="POST" action="/admin/changes/${task.id}/request" class="changes-form">
+        <textarea name="notes" placeholder="What needs to change?" required></textarea>
+        <button type="submit">Request Changes</button>
+      </form>
+      ${doneForm}
+    </td>
   </tr>`;
 }
 
@@ -439,6 +489,57 @@ router.post('/tasks/:id/status', async (req, res) => {
     res.redirect(`${back}?ok=` + encodeURIComponent(`"${task.project_name}" marked ${fmt.fmtStatus(status).replace(/^[^ ]+ /, '')}.`));
   } catch (e) {
     res.redirect(`${back}?error=` + encodeURIComponent(e.message));
+  }
+});
+
+// ── Changes / Revisions ─────────────────────────────────────────────────────────
+router.get('/changes', async (req, res) => {
+  try {
+    const tasks = await db.getTasksWithDeliverable(100);
+    const rows = tasks.length
+      ? tasks.map(changeRow).join('')
+      : `<tr><td colspan="6" class="empty">No files submitted yet. When an editor uploads a deliverable on Telegram, it'll appear here.</td></tr>`;
+    const body = `
+      <div class="card">
+        <h2>Change Requests</h2>
+        <p style="font-size:0.85rem;color:#6b7280;margin-bottom:16px">
+          Files your editors have delivered. <strong>Request Changes</strong> reopens the task — the editor is notified on Telegram with your notes and the round is tracked as a revision (status shows <span class="badge st-changes">🔁 Changes</span>). When they resubmit and you approve, <strong>Mark Done</strong>.
+        </p>
+        <table>
+          <thead><tr><th>Work</th><th>Employee</th><th>Reference File</th><th>Status</th><th>Latest Notes</th><th>Action</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+    res.send(page('Changes', 'changes', body, flashFrom(req.query)));
+  } catch (e) {
+    const hint = /deliverable|revision|column/i.test(e.message)
+      ? ' — run the deliverable + revision DB migrations (see src/db/schema.sql) to enable this tab.'
+      : '';
+    res.send(page('Changes', 'changes', '', `<div class="flash err">Could not load change requests: ${esc(e.message)}${hint}</div>`));
+  }
+});
+
+router.post('/changes/:id/request', async (req, res) => {
+  const { notes } = req.body;
+  try {
+    if (!notes || !notes.trim()) throw new Error('Change notes are required.');
+    const task = await db.getTaskById(req.params.id);
+    if (!task) throw new Error('Task not found.');
+    await requestChanges(task, notes.trim(), 'Admin Portal');
+    res.redirect('/admin/changes?ok=' + encodeURIComponent(`Change request sent to ${task.editors?.name || 'the editor'} for "${task.project_name}".`));
+  } catch (e) {
+    res.redirect('/admin/changes?error=' + encodeURIComponent(e.message));
+  }
+});
+
+router.post('/changes/:id/done', async (req, res) => {
+  try {
+    const task = await db.getTaskById(req.params.id);
+    if (!task) throw new Error('Task not found.');
+    await changeTaskStatus(task, 'completed', null);
+    res.redirect('/admin/changes?ok=' + encodeURIComponent(`"${task.project_name}" marked Completed.`));
+  } catch (e) {
+    res.redirect('/admin/changes?error=' + encodeURIComponent(e.message));
   }
 });
 

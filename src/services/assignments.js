@@ -103,4 +103,53 @@ async function changeTaskStatus(task, status, reason) {
   }
 }
 
-module.exports = { parseDeadline, assignProject, changeTaskStatus };
+// Reopens a delivered task for a change-request round, notifies the assigned
+// editor with the change notes, and tells the owners. The editor can reply to
+// the change-request message with the updated file + "done" to resubmit.
+async function requestChanges(task, notes, source) {
+  const nextRevision = (task.revision_count || 0) + 1;
+  const title = fmt.taskTitle(task);
+  const editorName = task.editors?.name || 'Unassigned';
+
+  // Reopen so the task re-enters active lists, reminders, etc. (always works).
+  await db.updateTaskStatus(task.id, 'in_progress', { completed_at: null });
+
+  // Record the revision round (best-effort — columns may be new).
+  try {
+    await db.setTaskRevision(task.id, { count: nextRevision, notes });
+  } catch (err) {
+    console.warn('[Changes] Could not store revision metadata:', err.message);
+  }
+
+  // Notify the editor and point the task's reply-target at this new message, so
+  // replying to it with the updated file resolves the right task.
+  if (task.editors?.telegram_id) {
+    const sent = await sendMessage(
+      task.editors.telegram_id,
+      `🔁 *Changes Requested* (Revision #${nextRevision})\n\n` +
+      `Task: *${title}*\n` +
+      `Type: ${fmt.fmtType(task.type)}\n\n` +
+      `📝 *What to change:*\n_${notes}_\n\n` +
+      `↩️ When it's ready, *reply to this message* with the updated file and send *done* (or caption the file *done*).`
+    );
+    const msgId = sent?.message_id?.toString();
+    if (msgId) {
+      try {
+        await db.updateTaskAssignmentMsgId(task.id, msgId);
+      } catch (err) {
+        console.warn('[Changes] Could not update reply-target message id:', err.message);
+      }
+    }
+  }
+
+  await sendToOwners(
+    `🔁 *Change Request Sent*\n\n` +
+    `Task: *${title}*\n` +
+    `Employee: *${editorName}*\n` +
+    `Revision: #${nextRevision}\n` +
+    `Notes: _${notes}_` +
+    (source ? `\n_(via ${source})_` : '')
+  );
+}
+
+module.exports = { parseDeadline, assignProject, changeTaskStatus, requestChanges };

@@ -45,6 +45,10 @@ create table if not exists tasks (
   deliverable_file_type text,            -- document | photo | video | audio | voice | animation | video_note
   deliverable_file_name text,            -- original file name (when Telegram provides one)
   deliverable_uploaded_at timestamptz,   -- when the deliverable file was received
+  deliverable_owner_msgs jsonb,          -- { "<ownerChatId>": <forwarded message_id> } for reply-to-file change requests
+  revision_count int not null default 0, -- how many change-request rounds this task has had
+  revision_notes text,                   -- latest change request from the owner/client
+  revision_requested_at timestamptz,     -- when the latest changes were requested
   started_at    timestamptz,             -- set on first transition to in_progress
   deadline_notified_at timestamptz,      -- last past-deadline nudge timestamp
   created_at    timestamptz not null default now(),
@@ -70,6 +74,14 @@ create index if not exists tasks_client_id_idx   on tasks(client_id);
 --   alter table tasks add column if not exists deliverable_file_type text;
 --   alter table tasks add column if not exists deliverable_file_name text;
 --   alter table tasks add column if not exists deliverable_uploaded_at timestamptz;
+
+-- ── Migration: change-request / revision loop ─────────────────────────────────
+-- If you already created the tasks table before the revision feature, run:
+--
+--   alter table tasks add column if not exists deliverable_owner_msgs jsonb;
+--   alter table tasks add column if not exists revision_count int not null default 0;
+--   alter table tasks add column if not exists revision_notes text;
+--   alter table tasks add column if not exists revision_requested_at timestamptz;
 
 -- ── Seed example clients ──────────────────────────────────────────────────────
 

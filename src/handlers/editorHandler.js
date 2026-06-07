@@ -212,13 +212,17 @@ async function handleEditorFile(editor, file, quotedMsgId) {
   if (title) ownerCaption += `\n📋 Task: *${title}*`;
   if (note) ownerCaption += `\n📝 _${note}_`;
   if (wantsComplete && linkable) ownerCaption += `\n✅ Marked *Completed* by employee.`;
-  await sendFileToOwners({ fileId, fileType, caption: ownerCaption });
+  const forwarded = await sendFileToOwners({ fileId, fileType, caption: ownerCaption });
 
-  // 2) Record it as the task's deliverable (best-effort — column may be new).
+  // 2) Record it as the task's deliverable + the per-owner message ids, so an
+  //    owner can reply to the file to request changes (best-effort — cols may be new).
   if (linkable) {
     try {
       await db.setTaskDeliverable(task.id, { fileId, fileType, fileName });
       task.deliverable_file_id = fileId; // so completeTask() mentions it
+      const ownerMsgs = {};
+      for (const f of forwarded) if (f.messageId != null) ownerMsgs[f.ownerId] = f.messageId;
+      if (Object.keys(ownerMsgs).length) await db.setTaskDeliverableOwnerMsgs(task.id, ownerMsgs);
     } catch (err) {
       console.warn('[Editor] Could not store deliverable:', err.message);
     }

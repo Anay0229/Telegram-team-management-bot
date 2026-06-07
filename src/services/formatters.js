@@ -37,7 +37,8 @@ function taskTitle(task) {
 function taskLine(task, editorName) {
   const name = editorName || '';
   const title = taskTitle(task);
-  return `• *${title}* (${fmtType(task.type)})\n  Status: ${fmtStatus(task.status)}\n  Deadline: ${fmtDeadline(task.deadline)}${name ? `\n  Employee: ${name}` : ''}${task.blocked_reason ? `\n  Reason: ${task.blocked_reason}` : ''}`;
+  const rev = task.revision_count ? ` 🔁 Rev ${task.revision_count}` : '';
+  return `• *${title}* (${fmtType(task.type)})${rev}\n  Status: ${fmtStatus(task.status)}\n  Deadline: ${fmtDeadline(task.deadline)}${name ? `\n  Employee: ${name}` : ''}${task.blocked_reason ? `\n  Reason: ${task.blocked_reason}` : ''}`;
 }
 
 function editorLoadSummary(scored, index) {
@@ -157,6 +158,7 @@ function helpMenu(isOwner) {
       `*clients*\n  → List all available clients\n\n` +
       `*assign to [name]*\n  → Confirm employee after seeing load summary\n\n` +
       `*mark [project or client] [done | in progress | blocked | pending] [reason]*\n  → Set any task's status\n\n` +
+      `*changes [project or client] | [what to change]*\n  → Reopen a delivered task and send the editor revision notes\n  → _Or just reply to the editor's file with the notes_\n\n` +
       `*team status*\n  → All employees and active tasks\n\n` +
       `*[employee name] status*\n  → Drill-down on specific employee\n\n` +
       `*overdue*\n  → All tasks past deadline\n\n` +
@@ -172,6 +174,7 @@ function helpMenu(isOwner) {
     `*done* / *done 2*\n  → Mark a task as Completed\n\n` +
     `*blocked [reason]* / *blocked 2 [reason]*\n  → Mark Blocked and alert the owners\n\n` +
     `📎 *Send a file*\n  → Reply to a task's message with the file and I'll forward it to the owners. Caption it *done* to also mark the task Completed.\n\n` +
+    `🔁 *Revisions*\n  → If management asks for changes, the task reopens. Reply to that message with the updated file and *done* to resubmit.\n\n` +
     `*my tasks*\n  → See all your active tasks (with numbers)\n\n` +
     `*send raw folder*\n  → Get Raw Files Drive link\n\n` +
     `*send final folder*\n  → Get Final Data Drive link\n\n` +

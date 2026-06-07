@@ -199,6 +199,41 @@ async function setTaskDeliverable(taskId, { fileId, fileType, fileName }) {
   if (error) throw error;
 }
 
+// Stores the per-owner Telegram message_ids of a forwarded deliverable, so an
+// owner can reply to that file to request changes. ownerMsgs = { ownerChatId: messageId }.
+async function setTaskDeliverableOwnerMsgs(taskId, ownerMsgs) {
+  const { error } = await supabase
+    .from('tasks')
+    .update({ deliverable_owner_msgs: ownerMsgs })
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
+// Finds the task whose forwarded deliverable (in this owner's chat) has the
+// given message_id — used to resolve "reply to the file" change requests.
+async function getTaskByDeliverableOwnerMsg(ownerId, messageId) {
+  const { data, error } = await supabase
+    .from('tasks')
+    .select('*, editors(name, telegram_id), clients(name)')
+    .eq(`deliverable_owner_msgs->>${ownerId}`, String(messageId))
+    .limit(1);
+  if (error) throw error;
+  return data[0] || null;
+}
+
+// Records a change-request round on a task.
+async function setTaskRevision(taskId, { count, notes }) {
+  const { error } = await supabase
+    .from('tasks')
+    .update({
+      revision_count: count,
+      revision_notes: notes,
+      revision_requested_at: new Date().toISOString(),
+    })
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
 // Finds active tasks by main-work description OR client name — used by the mark command.
 async function findActiveTasksByProjectName(name) {
   const { data: byWork, error: e1 } = await supabase
@@ -233,6 +268,51 @@ async function findActiveTasksByProjectName(name) {
     seen.add(t.id);
     return true;
   });
+}
+
+// Like findActiveTasksByProjectName but across ALL statuses (incl. completed),
+// most recent first — used by the change-request flow, which targets delivered work.
+async function findTasksByProjectNameAnyStatus(name) {
+  const { data: byWork, error: e1 } = await supabase
+    .from('tasks')
+    .select('*, editors(name, telegram_id), clients(name)')
+    .ilike('project_name', `%${name}%`)
+    .order('created_at', { ascending: false });
+  if (e1) throw e1;
+
+  const { data: matchedClients } = await supabase
+    .from('clients').select('id').ilike('name', `%${name}%`);
+  const clientIds = (matchedClients || []).map((c) => c.id);
+
+  let byClient = [];
+  if (clientIds.length) {
+    const { data, error: e2 } = await supabase
+      .from('tasks')
+      .select('*, editors(name, telegram_id), clients(name)')
+      .in('client_id', clientIds)
+      .order('created_at', { ascending: false });
+    if (e2) throw e2;
+    byClient = data;
+  }
+
+  const seen = new Set();
+  return [...byWork, ...byClient].filter((t) => {
+    if (seen.has(t.id)) return false;
+    seen.add(t.id);
+    return true;
+  });
+}
+
+// Tasks that have a submitted deliverable file — drives the admin Changes tab.
+async function getTasksWithDeliverable(limit = 100) {
+  const { data, error } = await supabase
+    .from('tasks')
+    .select('*, editors(name, telegram_id), clients(name)')
+    .not('deliverable_file_id', 'is', null)
+    .order('deliverable_uploaded_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data;
 }
 
 async function getActiveTasksForEditor(editorId) {
@@ -474,7 +554,12 @@ module.exports = {
   updateTaskAssignmentMsgId,
   getTaskByAssignmentMsgId,
   setTaskDeliverable,
+  setTaskDeliverableOwnerMsgs,
+  getTaskByDeliverableOwnerMsg,
+  setTaskRevision,
   findActiveTasksByProjectName,
+  findTasksByProjectNameAnyStatus,
+  getTasksWithDeliverable,
   getActiveTasksForEditor,
   getMostRecentActiveTaskForEditor,
   updateTaskStatus,

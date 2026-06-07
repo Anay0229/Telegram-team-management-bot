@@ -107,11 +107,14 @@ async function sendFile(chatId, { fileId, fileType, caption }) {
   }
 }
 
+// Returns [{ ownerId, messageId }] so callers can map the forwarded file back to
+// a task (used so owners can reply to the file to request changes).
 async function sendFileToOwners({ fileId, fileType, caption }) {
   const results = [];
   for (const id of config.owners) {
     try {
-      results.push(await sendFile(id, { fileId, fileType, caption }));
+      const sent = await sendFile(id, { fileId, fileType, caption });
+      results.push({ ownerId: String(id), messageId: sent?.message_id ?? null });
     } catch (err) {
       console.error(`[Bot] Failed to send file to owner ${id}:`, err.message);
     }
