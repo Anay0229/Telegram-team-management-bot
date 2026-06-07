@@ -3,7 +3,7 @@ const { sendMessage } = require('../services/telegram');
 const lb = require('../services/loadBalancer');
 const fmt = require('../services/formatters');
 const { parseDeadline, assignProject, changeTaskStatus, requestChanges } = require('../services/assignments');
-const { sendDeadlineReminders, sendPastDeadlineEditorNudges, sendEscalationAlerts } = require('../jobs/scheduler');
+const { sendDeadlineReminders, sendEscalationAlerts } = require('../jobs/scheduler');
 
 // Pending assignment confirmations, keyed by owner number so two owners can be
 // mid-assignment at the same time without clashing.
@@ -146,20 +146,18 @@ async function handleOwnerMessage(from, body, quotedMsgId) {
   // ── test reminders (run the deadline checks on demand) ──────────────────────────
   if (text === 'test reminders' || text === 'run reminders') {
     await sendMessage(from, `⏳ Running deadline checks now…`);
-    const [rem, nudge, esc] = await Promise.all([
+    const [rem, esc] = await Promise.all([
       sendDeadlineReminders(),
-      sendPastDeadlineEditorNudges(),
       sendEscalationAlerts(),
     ]);
-    const err = rem.error || nudge.error || esc.error;
+    const err = rem.error || esc.error;
     await sendMessage(
       from,
       `✅ *Reminder check complete*\n\n` +
-      `⏰ Due-soon reminders: *${rem.sent || 0}* sent (${rem.dueSoon || 0} task${rem.dueSoon === 1 ? '' : 's'} due within 24h)\n` +
-      `⚠️ Past-deadline nudges: *${nudge.sent || 0}* sent\n` +
+      `⏰ Deadline reminders: *${rem.sent || 0}* sent (${rem.due || 0} at/past deadline)\n` +
       `🚨 Escalations: *${esc.sent || 0}* sent\n\n` +
       (err ? `⚠️ Some checks errored: _${err}_\n\n` : ``) +
-      `_Reminders are also checked automatically every 10 minutes._`
+      `_Reminders fire automatically the minute a deadline is reached._`
     );
     return;
   }

@@ -512,6 +512,21 @@ async function getEmployeeStats() {
   });
 }
 
+// Active tasks whose deadline has been reached and that haven't been reminded
+// yet — drives the "remind exactly when the deadline is hit" reminder.
+async function getTasksAtDeadlineNeedingReminder() {
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from('tasks')
+    .select('*, editors(name, telegram_id), clients(name)')
+    .in('status', ['pending', 'in_progress', 'blocked'])
+    .not('deadline', 'is', null)
+    .lte('deadline', now)
+    .is('deadline_notified_at', null);
+  if (error) throw error;
+  return data;
+}
+
 // Tasks past their deadline that haven't been notified yet (or last notified >24 hrs ago).
 async function getOverdueTasksNeedingEditorNotification() {
   const now = new Date();
@@ -568,6 +583,7 @@ module.exports = {
   getCompletedToday,
   getTasksForEditorWithJoin,
   getTasksDueSoon,
+  getTasksAtDeadlineNeedingReminder,
   getTasksStillInProgressAfterDeadline,
   getAllTasksForEditor,
   getCompletedTasksHistory,

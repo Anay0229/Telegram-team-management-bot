@@ -3,12 +3,9 @@ const db = require('../db/supabase');
 const { sendMessage, sendToOwner } = require('../services/telegram');
 const fmt = require('../services/formatters');
 
-const REMINDER_WINDOW_MS = 24 * 60 * 60 * 1000;       // 24 hours
 const ESCALATION_WINDOW_MS = 2 * 60 * 60 * 1000;       // 2 hours past deadline
 
-// Track which tasks have already received a reminder/escalation this cycle
-// to avoid duplicate messages if the cron fires while a previous run is still processing.
-const remindedTaskIds = new Set();
+// Track which tasks have already been escalated this run to avoid duplicates.
 const escalatedTaskIds = new Set();
 
 function startScheduler() {
@@ -17,18 +14,15 @@ function startScheduler() {
   // ── Daily digest — 9:00 AM every day ──────────────────────────────────────
   cron.schedule('0 9 * * *', sendDailyDigest, tz);
 
-  // ── 24-hr deadline reminders — every 10 min ───────────────────────────────
-  // Runs often so reminders are timely and short-fuse tasks aren't missed; the
-  // remindedTaskIds set keeps each task to a single reminder per window.
-  cron.schedule('*/10 * * * *', sendDeadlineReminders, tz);
+  // ── Deadline reminders — every minute ─────────────────────────────────────
+  // Fires the moment a task's deadline is reached (never early). The
+  // deadline_notified_at flag guarantees exactly one reminder per task.
+  cron.schedule('* * * * *', sendDeadlineReminders, tz);
 
-  // ── Escalation alerts — every 10 min ──────────────────────────────────────
+  // ── Escalation alerts to owners — every 10 min ────────────────────────────
   cron.schedule('*/10 * * * *', sendEscalationAlerts, tz);
 
-  // ── Past-deadline editor nudges — every 10 min ────────────────────────────
-  cron.schedule('5-59/10 * * * *', sendPastDeadlineEditorNudges, tz);
-
-  console.log('[Scheduler] Cron jobs started (tz Asia/Kolkata): digest @09:00, reminders/escalations every 10 min, past-deadline nudges every 10 min.');
+  console.log('[Scheduler] Cron jobs started (tz Asia/Kolkata): digest @09:00, deadline reminders every minute, escalations every 10 min.');
 }
 
 async function sendDailyDigest() {
@@ -45,30 +39,27 @@ async function sendDailyDigest() {
   }
 }
 
+// Reminds the assigned editor the moment a task's deadline is reached — not before.
+// Each task is reminded exactly once (tracked via deadline_notified_at).
 async function sendDeadlineReminders() {
   try {
-    const tasks = await db.getTasksDueSoon(REMINDER_WINDOW_MS);
-    let sent = 0, skipped = 0, noEditor = 0;
+    const tasks = await db.getTasksAtDeadlineNeedingReminder();
+    let sent = 0, noEditor = 0;
     for (const task of tasks) {
-      if (remindedTaskIds.has(task.id)) { skipped++; continue; }
       const editor = task.editors;
       if (!editor || !editor.telegram_id) { noEditor++; continue; }
       await sendMessage(
         editor.telegram_id,
-        `⏰ *Deadline Reminder*\n\n` +
-        `Your project *${task.project_name}* is due in under 24 hours.\n` +
+        `⏰ *Deadline Reached*\n\n` +
+        `Your task *${task.project_name}* is due now.\n` +
         `Deadline: ${fmt.fmtDeadline(task.deadline)}\n\n` +
-        `Reply *done* when complete or *blocked [reason]* if you need help.`
+        `Reply *done* when complete, or *blocked [reason]* if you're stuck.`
       );
-      remindedTaskIds.add(task.id);
-      // Clear the reminder flag after 25 hours so it can fire again on a new window
-      setTimeout(() => remindedTaskIds.delete(task.id), 25 * 60 * 60 * 1000);
+      await db.markTaskDeadlineNotified(task.id);
       sent++;
     }
-    if (tasks.length) {
-      console.log(`[Scheduler] Deadline reminders: ${tasks.length} due within 24h → ${sent} sent, ${skipped} already-reminded${noEditor ? `, ${noEditor} missing-editor` : ''}.`);
-    }
-    return { dueSoon: tasks.length, sent, skipped, noEditor };
+    if (sent) console.log(`[Scheduler] Deadline reminders sent: ${sent}${noEditor ? `, ${noEditor} missing-editor` : ''}.`);
+    return { due: tasks.length, sent, noEditor };
   } catch (err) {
     console.error('[Scheduler] Deadline reminders failed:', err.message);
     return { error: err.message };
@@ -102,39 +93,9 @@ async function sendEscalationAlerts() {
   }
 }
 
-async function sendPastDeadlineEditorNudges() {
-  try {
-    const tasks = await db.getOverdueTasksNeedingEditorNotification();
-    let sent = 0, noEditor = 0;
-    for (const task of tasks) {
-      const editor = task.editors;
-      if (!editor || !editor.telegram_id) { noEditor++; continue; }
-      const hoursOverdue = Math.round((Date.now() - new Date(task.deadline).getTime()) / 3600000);
-      await sendMessage(
-        editor.telegram_id,
-        `⚠️ *Past Deadline — Action Needed*\n\n` +
-        `Project *${task.project_name}* was due *${hoursOverdue} hour${hoursOverdue !== 1 ? 's' : ''} ago*.\n` +
-        `Deadline: ${fmt.fmtDeadline(task.deadline)}\n\n` +
-        `Please update your status:\n` +
-        `• Reply *done* if you've finished\n` +
-        `• Reply *blocked [reason]* if you need help\n\n` +
-        `_Owners have been notified of the delay._`
-      );
-      await db.markTaskDeadlineNotified(task.id);
-      sent++;
-    }
-    if (sent) console.log(`[Scheduler] Past-deadline nudges sent: ${sent} task(s).`);
-    return { sent, noEditor };
-  } catch (err) {
-    console.error('[Scheduler] Past-deadline nudges failed:', err.message);
-    return { error: err.message };
-  }
-}
-
 module.exports = {
   startScheduler,
   sendDailyDigest,
   sendDeadlineReminders,
   sendEscalationAlerts,
-  sendPastDeadlineEditorNudges,
 };
