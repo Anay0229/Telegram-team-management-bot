@@ -19,23 +19,16 @@ function parseDeadline(dateStr) {
   return null;
 }
 
-// Drive folder mapping for the new task types
-function driveLink(type) {
-  switch (type) {
-    case 'shoot':
-    case 'data_sorting':
-      return config.drive.rawFiles;
-    case 'edit':
-    case 'graphic_designing':
-    default:
-      return config.drive.finalData;
-  }
+// Editors always receive the Raw Files folder on assignment — that's their source
+// material to work from (read from DRIVE_RAW_FILES in .env).
+function driveLink() {
+  return config.drive.rawFiles;
 }
 
 async function assignProject({ projectName, type, editor, deadline, note, source, clientId }) {
   const client = clientId ? await db.getClientById(clientId) : null;
   const clientName = client?.name || null;
-  const link = driveLink(type);
+  const link = driveLink();
 
   const task = await db.createTask({
     projectName,
