@@ -1,14 +1,25 @@
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
+const compression = require('compression');
 const config = require('./config');
 const { bot, extractFile } = require('./services/telegram');
 const { handleIncomingMessage, handleIncomingFile } = require('./handlers/messageHandler');
+const { handleCallbackQuery } = require('./handlers/callbackHandler');
 const { startScheduler } = require('./jobs/scheduler');
 
 // ── Telegram bot events ───────────────────────────────────────────────────────
 
 bot.on('polling_error', (err) => {
   console.error('[Bot] Polling error:', err.code, err.message);
+});
+
+// Inline-button taps (Started / Done / Blocked / Approve / Request Changes / assign).
+bot.on('callback_query', (query) => {
+  console.log(`[CALLBACK] From: ${query.from?.id} | data: ${query.data}`);
+  handleCallbackQuery(query).catch((err) => {
+    console.error('[Bot] Error handling callback:', err);
+  });
 });
 
 bot.on('message', async (msg) => {
@@ -62,7 +73,17 @@ process.on('unhandledRejection', (reason) => {
 
 // ── Express (health check + admin panel) ─────────────────────────────────────
 const app = express();
+
+// gzip text responses. level 4 is a deliberate trade-off: this server runs on a
+// weak phone CPU shared with the Telegram polling loop, so we take most of the
+// bandwidth win (text shrinks ~60% by level 3-4) without paying level-9 CPU cost.
+app.use(compression({ level: 4 }));
+
 app.use(express.urlencoded({ extended: false }));
+
+// Static assets (admin.css, etc.) are content-stable — let the browser cache them
+// for a month so the phone only ever uploads these bytes once per visitor.
+app.use(express.static(path.join(__dirname, 'public'), { maxAge: '30d', immutable: true }));
 
 const adminRouter = require('./routes/admin');
 app.use('/admin', adminRouter);

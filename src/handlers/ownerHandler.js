@@ -2,12 +2,13 @@ const db = require('../db/supabase');
 const { sendMessage } = require('../services/telegram');
 const lb = require('../services/loadBalancer');
 const fmt = require('../services/formatters');
+const kb = require('../services/keyboards');
 const { parseDeadline, assignProject, changeTaskStatus, requestChanges } = require('../services/assignments');
 const { sendDeadlineReminders, sendEscalationAlerts } = require('../jobs/scheduler');
 
-// Pending assignment confirmations, keyed by owner number so two owners can be
-// mid-assignment at the same time without clashing.
-const pendingAssignments = new Map();
+// Pending assignment confirmations + button-driven change-note prompts live in a
+// shared module so the inline-button callback handler can read/write them too.
+const { pendingAssignments, pendingChangeNotes } = require('./pendingState');
 
 // Type keyword → canonical type
 const TYPE_ALIASES = {
@@ -25,8 +26,37 @@ function resolveType(raw) {
   return TYPE_ALIASES[raw.toLowerCase().trim()] || null;
 }
 
+// True when the text is a recognised owner command, so a pending change-note
+// prompt won't swallow it.
+function isKnownOwnerCommand(body) {
+  const t = body.trim().toLowerCase();
+  if (['clients', 'team status', 'overdue', 'completed today', 'test reminders', 'run reminders', 'help'].includes(t)) return true;
+  if (/^(new project\s*:|mark\s+|changes?\b|revisions?\b|revise\b|redo\b|assign to\s+)/i.test(t)) return true;
+  if (/\bstatus$/i.test(t)) return true; // "[employee name] status"
+  return false;
+}
+
 async function handleOwnerMessage(from, body, quotedMsgId) {
   const text = body.trim().toLowerCase();
+
+  // ── awaiting change notes (owner tapped the 🔁 Request Changes button) ───────
+  // Capture the next free-text message as the revision notes, unless they typed
+  // another recognised command instead.
+  if (pendingChangeNotes.has(from)) {
+    if (isKnownOwnerCommand(body)) {
+      pendingChangeNotes.delete(from);
+    } else {
+      const { taskId } = pendingChangeNotes.get(from);
+      pendingChangeNotes.delete(from);
+      const task = await db.getTaskById(taskId);
+      if (task) {
+        await requestChanges(task, body.trim(), 'Telegram (button)');
+      } else {
+        await sendMessage(from, `❌ I couldn't find that task anymore.`);
+      }
+      return;
+    }
+  }
 
   // ── check if THIS owner is awaiting employee confirmation ────────────────────
   if (pendingAssignments.has(from)) {
@@ -246,7 +276,11 @@ async function handleNewProject(from, body) {
 
   const clientName = client?.name || null;
   pendingAssignments.set(from, { projectName, type, deadline, note, ranked, clientId: client?.id || null, clientName });
-  await sendMessage(from, fmt.assignmentConfirmationPrompt(clientName, projectName, type, deadline, ranked, note));
+  await sendMessage(
+    from,
+    fmt.assignmentConfirmationPrompt(clientName, projectName, type, deadline, ranked, note),
+    kb.assignmentButtons(ranked)
+  );
 }
 
 // ── Assignment confirmation ────────────────────────────────────────────────────

@@ -35,7 +35,7 @@ create table if not exists tasks (
   type          text not null check (type in ('edit', 'shoot', 'graphic_designing', 'data_sorting')),
   assigned_to   uuid not null references editors(id) on delete restrict,
   status        text not null default 'pending'
-                  check (status in ('pending', 'in_progress', 'blocked', 'completed')),
+                  check (status in ('pending', 'in_progress', 'blocked', 'submitted_for_review', 'completed')),
   deadline      timestamptz,
   drive_link    text,
   blocked_reason text,
@@ -82,6 +82,19 @@ create index if not exists tasks_client_id_idx   on tasks(client_id);
 --   alter table tasks add column if not exists revision_count int not null default 0;
 --   alter table tasks add column if not exists revision_notes text;
 --   alter table tasks add column if not exists revision_requested_at timestamptz;
+
+-- ── Migration: approval flow (submitted_for_review status) ─────────────────────
+-- If you already created the tasks table before the approval feature, the status
+-- CHECK constraint must be widened to allow the new 'submitted_for_review' value.
+-- (The constraint name is auto-generated; the block below finds and replaces it.)
+--
+--   alter table tasks drop constraint if exists tasks_status_check;
+--   alter table tasks add constraint tasks_status_check
+--     check (status in ('pending', 'in_progress', 'blocked', 'submitted_for_review', 'completed'));
+--
+-- Until this runs, the bot degrades gracefully: work the employee marks "done"
+-- stays 'in_progress' (instead of 'submitted_for_review') but owners still get
+-- the Approve / Request Changes prompt.
 
 -- ── Seed example clients ──────────────────────────────────────────────────────
 

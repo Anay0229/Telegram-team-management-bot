@@ -240,7 +240,7 @@ async function findActiveTasksByProjectName(name) {
     .from('tasks')
     .select('*, editors(name, telegram_id), clients(name)')
     .ilike('project_name', `%${name}%`)
-    .in('status', ['pending', 'in_progress', 'blocked'])
+    .in('status', ['pending', 'in_progress', 'blocked', 'submitted_for_review'])
     .order('deadline', { ascending: true });
   if (e1) throw e1;
 
@@ -255,7 +255,7 @@ async function findActiveTasksByProjectName(name) {
       .from('tasks')
       .select('*, editors(name, telegram_id), clients(name)')
       .in('client_id', clientIds)
-      .in('status', ['pending', 'in_progress', 'blocked'])
+      .in('status', ['pending', 'in_progress', 'blocked', 'submitted_for_review'])
       .order('deadline', { ascending: true });
     if (e2) throw e2;
     byClient = data;
@@ -356,12 +356,49 @@ async function updateTaskStatus(taskId, status, extra = {}) {
   return data;
 }
 
+// Updates a task's deadline (used by the bulk "set deadline" admin action).
+async function setTaskDeadline(taskId, deadline) {
+  const { data, error } = await supabase
+    .from('tasks')
+    .update({ deadline })
+    .eq('id', taskId)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// Reassigns a task to a different employee (bulk reassign + single reassign).
+async function setTaskAssignee(taskId, editorId) {
+  const { data, error } = await supabase
+    .from('tasks')
+    .update({ assigned_to: editorId })
+    .eq('id', taskId)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
 async function getAllActiveTasks() {
   const { data, error } = await supabase
     .from('tasks')
     .select('*, editors(name, telegram_id), clients(name)')
-    .in('status', ['pending', 'in_progress', 'blocked'])
+    .in('status', ['pending', 'in_progress', 'blocked', 'submitted_for_review'])
     .order('deadline', { ascending: true });
+  if (error) throw error;
+  return data;
+}
+
+// Tasks an employee has submitted and that are awaiting an owner's approve /
+// request-changes decision — drives the admin approval queue.
+async function getTasksAwaitingReview(limit = 100) {
+  const { data, error } = await supabase
+    .from('tasks')
+    .select('*, editors(name, telegram_id), clients(name)')
+    .eq('status', 'submitted_for_review')
+    .order('deliverable_uploaded_at', { ascending: false, nullsFirst: false })
+    .limit(limit);
   if (error) throw error;
   return data;
 }
@@ -395,7 +432,7 @@ async function getTasksForEditorWithJoin(editorId) {
     .from('tasks')
     .select('*')
     .eq('assigned_to', editorId)
-    .in('status', ['pending', 'in_progress', 'blocked'])
+    .in('status', ['pending', 'in_progress', 'blocked', 'submitted_for_review'])
     .order('deadline', { ascending: true });
   if (error) throw error;
   return data;
@@ -494,7 +531,8 @@ async function getEmployeeStats() {
       }
     } else {
       s.active++;
-      if (t.deadline && new Date(t.deadline) < now) s.overdue++;
+      // Work already submitted for review isn't "overdue" — the employee delivered.
+      if (t.status !== 'submitted_for_review' && t.deadline && new Date(t.deadline) < now) s.overdue++;
     }
     if (t.started_at && (!s.lastStartedAt || new Date(t.started_at) > new Date(s.lastStartedAt))) {
       s.lastStartedAt = t.started_at;
@@ -578,7 +616,10 @@ module.exports = {
   getActiveTasksForEditor,
   getMostRecentActiveTaskForEditor,
   updateTaskStatus,
+  setTaskDeadline,
+  setTaskAssignee,
   getAllActiveTasks,
+  getTasksAwaitingReview,
   getOverdueTasks,
   getCompletedToday,
   getTasksForEditorWithJoin,

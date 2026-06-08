@@ -10,6 +10,7 @@ function fmtStatus(status) {
     pending: '⏳ Pending',
     in_progress: '🔄 In Progress',
     blocked: '🚫 Blocked',
+    submitted_for_review: '📤 Submitted for Review',
     completed: '✅ Completed',
   };
   return map[status] || status;
@@ -64,7 +65,7 @@ function assignmentConfirmationPrompt(clientName, projectName, type, deadline, r
     `\n` +
     `*Ranked Employees (least loaded first):*\n` +
     lines.join('\n') +
-    `\n\nReply with the employee's *number* (1, 2…) or *name* to assign.`
+    `\n\n👇 *Tap an employee below* to assign, or reply with their *number* (1, 2…) or *name*.`
   );
 }
 
@@ -78,8 +79,8 @@ function assignmentNotification(clientName, projectName, type, deadline, driveLi
     `Deadline: ${fmtDeadline(deadline)}\n` +
     (note ? `\n📝 *Note from management:*\n_${note}_\n` : '') +
     `\n📁 *Drive Folder:* ${driveLink}\n\n` +
-    `↩️ *Tip:* reply to *this* message with *started*, *done*, or *blocked [reason]* to update exactly this task.\n` +
-    `📎 When it's ready, reply here with the *file* — I'll forward it to the owners. Add caption *done* to finish in one step.\n` +
+    `👇 *Tap a button below* to update this task, or reply to this message with *started*, *done*, or *blocked [reason]*.\n` +
+    `📎 When it's ready, reply here with the *file* — I'll forward it to the owners. Add caption *done* to submit it for review.\n` +
     `Type *help* for all commands.`
   );
 }
@@ -159,6 +160,7 @@ function helpMenu(isOwner) {
       `*assign to [name]*\n  → Confirm employee after seeing load summary\n\n` +
       `*mark [project or client] [done | in progress | blocked | pending] [reason]*\n  → Set any task's status\n\n` +
       `*changes [project or client] | [what to change]*\n  → Reopen a delivered task and send the editor revision notes\n  → _Or just reply to the editor's file with the notes_\n\n` +
+      `✅ *Approvals*\n  → When an employee submits work, you get *Approve* / *Request Changes* buttons. Approve completes it; Request Changes reopens it for a revision.\n\n` +
       `*team status*\n  → All employees and active tasks\n\n` +
       `*[employee name] status*\n  → Drill-down on specific employee\n\n` +
       `*overdue*\n  → All tasks past deadline\n\n` +
@@ -169,11 +171,13 @@ function helpMenu(isOwner) {
   }
   return (
     `📖 *Your Commands*\n\n` +
-    `When you have several tasks, *reply to the assignment message* (or add its number) to update the right one:\n\n` +
+    `💡 Every task message has *quick buttons* — tap 🔄 Started, ✅ Done, or 🚫 Blocked to update it instantly.\n\n` +
+    `Prefer typing? When you have several tasks, *reply to the assignment message* (or add its number):\n\n` +
     `*started* / *started 2*\n  → Mark a task as In Progress\n\n` +
-    `*done* / *done 2*\n  → Mark a task as Completed\n\n` +
+    `*done* / *done 2*\n  → Submit a task for owner review\n\n` +
     `*blocked [reason]* / *blocked 2 [reason]*\n  → Mark Blocked and alert the owners\n\n` +
-    `📎 *Send a file*\n  → Reply to a task's message with the file and I'll forward it to the owners. Caption it *done* to also mark the task Completed.\n\n` +
+    `📎 *Send a file*\n  → Reply to a task's message with the file and I'll forward it to the owners. Caption it *done* to submit it for review.\n\n` +
+    `✅ *Approval*\n  → When you submit work it goes to the owners to *approve* or *request changes* — you'll be notified either way.\n\n` +
     `🔁 *Revisions*\n  → If management asks for changes, the task reopens. Reply to that message with the updated file and *done* to resubmit.\n\n` +
     `*my tasks*\n  → See all your active tasks (with numbers)\n\n` +
     `*send raw folder*\n  → Get Raw Files Drive link\n\n` +

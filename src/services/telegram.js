@@ -8,30 +8,59 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
-async function sendMessage(chatId, text) {
+// `replyMarkup` (optional) attaches an inline keyboard: { inline_keyboard: [[...]] }.
+async function sendMessage(chatId, text, replyMarkup) {
+  const opts = { parse_mode: 'Markdown' };
+  if (replyMarkup) opts.reply_markup = replyMarkup;
   try {
-    return await bot.sendMessage(String(chatId), text, { parse_mode: 'Markdown' });
+    return await bot.sendMessage(String(chatId), text, opts);
   } catch (err) {
     if (err.response?.body?.description?.includes('parse')) {
       // Markdown parsing failed (e.g. unmatched * or _ in user-entered text) — send plain
       const plain = text.replace(/[*_`]/g, '');
-      return bot.sendMessage(String(chatId), plain);
+      const plainOpts = replyMarkup ? { reply_markup: replyMarkup } : {};
+      return bot.sendMessage(String(chatId), plain, plainOpts);
     }
     console.error(`[Bot] Failed to send to ${chatId}:`, err.message);
     throw err;
   }
 }
 
-async function sendToOwners(text) {
+async function sendToOwners(text, replyMarkup) {
   const results = [];
   for (const id of config.owners) {
     try {
-      results.push(await sendMessage(id, text));
+      results.push(await sendMessage(id, text, replyMarkup));
     } catch (err) {
       console.error(`[Bot] Failed to send to owner ${id}:`, err.message);
     }
   }
   return results;
+}
+
+// Answers a callback_query so Telegram stops the button's loading spinner.
+// `text` (optional) shows a brief toast to the user. Best-effort — never throws.
+async function answerCallback(callbackQueryId, text, showAlert = false) {
+  try {
+    await bot.answerCallbackQuery(callbackQueryId, text ? { text, show_alert: showAlert } : {});
+  } catch (err) {
+    console.warn('[Bot] answerCallbackQuery failed:', err.message);
+  }
+}
+
+// Replaces (or clears, when markup is null) the inline keyboard on an existing
+// message — used to "consume" buttons once an action has been taken so they
+// can't be tapped twice. Best-effort: stale/old messages simply stay as-is.
+async function editMessageReplyMarkup(chatId, messageId, replyMarkup) {
+  try {
+    await bot.editMessageReplyMarkup(replyMarkup || { inline_keyboard: [] }, {
+      chat_id: String(chatId),
+      message_id: messageId,
+    });
+  } catch (err) {
+    // "message is not modified" / "message to edit not found" are non-fatal.
+    console.warn('[Bot] editMessageReplyMarkup failed:', err.message);
+  }
 }
 
 const sendToOwner = sendToOwners;
@@ -70,9 +99,10 @@ function extractFile(msg) {
 
 // Re-sends a file (by Telegram file_id) to a chat using the method matching its
 // type. video_note can't carry a caption, so the caption is sent separately.
-async function sendFile(chatId, { fileId, fileType, caption }) {
+async function sendFile(chatId, { fileId, fileType, caption, replyMarkup }) {
   const id = String(chatId);
   const opts = caption ? { caption, parse_mode: 'Markdown' } : {};
+  if (replyMarkup) opts.reply_markup = replyMarkup;
   try {
     switch (fileType) {
       case 'photo':     return await bot.sendPhoto(id, fileId, opts);
@@ -92,6 +122,7 @@ async function sendFile(chatId, { fileId, fileType, caption }) {
     // Caption Markdown can fail on user-supplied names — retry without parsing.
     if (caption && err.response?.body?.description?.includes('parse')) {
       const plain = { caption: caption.replace(/[*_`]/g, '') };
+      if (replyMarkup) plain.reply_markup = replyMarkup;
       switch (fileType) {
         case 'photo':     return bot.sendPhoto(id, fileId, plain);
         case 'video':     return bot.sendVideo(id, fileId, plain);
@@ -109,11 +140,11 @@ async function sendFile(chatId, { fileId, fileType, caption }) {
 
 // Returns [{ ownerId, messageId }] so callers can map the forwarded file back to
 // a task (used so owners can reply to the file to request changes).
-async function sendFileToOwners({ fileId, fileType, caption }) {
+async function sendFileToOwners({ fileId, fileType, caption, replyMarkup }) {
   const results = [];
   for (const id of config.owners) {
     try {
-      const sent = await sendFile(id, { fileId, fileType, caption });
+      const sent = await sendFile(id, { fileId, fileType, caption, replyMarkup });
       results.push({ ownerId: String(id), messageId: sent?.message_id ?? null });
     } catch (err) {
       console.error(`[Bot] Failed to send file to owner ${id}:`, err.message);
@@ -122,4 +153,7 @@ async function sendFileToOwners({ fileId, fileType, caption }) {
   return results;
 }
 
-module.exports = { bot, sendMessage, sendToOwner, sendToOwners, extractFile, sendFile, sendFileToOwners };
+module.exports = {
+  bot, sendMessage, sendToOwner, sendToOwners, extractFile, sendFile, sendFileToOwners,
+  answerCallback, editMessageReplyMarkup,
+};

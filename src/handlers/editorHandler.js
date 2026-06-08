@@ -1,6 +1,9 @@
 const db = require('../db/supabase');
 const { sendMessage, sendToOwners, sendFileToOwners } = require('../services/telegram');
 const fmt = require('../services/formatters');
+const kb = require('../services/keyboards');
+const assignments = require('../services/assignments');
+const { pendingBlockReason } = require('./pendingState');
 const config = require('../config');
 
 // Attach the clients join when resolving via assignment msg id or task list
@@ -8,6 +11,20 @@ const config = require('../config');
 
 async function handleEditorMessage(editor, body, quotedMsgId) {
   const text = body.trim().toLowerCase();
+
+  // ── awaiting a block reason (editor tapped the 🚫 Blocked button) ───────────
+  // Capture the next free-text message as the reason — unless they typed another
+  // recognised command instead, in which case drop the wait and handle that.
+  if (pendingBlockReason.has(editor.telegram_id)) {
+    if (isKnownEditorCommand(body)) {
+      pendingBlockReason.delete(editor.telegram_id);
+    } else {
+      const { taskId, title } = pendingBlockReason.get(editor.telegram_id);
+      pendingBlockReason.delete(editor.telegram_id);
+      await applyBlockReason(editor, taskId, title, body.trim());
+      return;
+    }
+  }
 
   // ── help ──────────────────────────────────────────────────────────────────
   if (text === 'help') {
@@ -73,6 +90,30 @@ function parseStatusCommand(body) {
     return { status: 'blocked', taskNumber, reason };
   }
   return null;
+}
+
+// True when the text is a recognised editor command (so it shouldn't be swallowed
+// as a pending block reason). Status commands count as commands.
+function isKnownEditorCommand(body) {
+  const t = body.trim().toLowerCase();
+  if (['help', 'my tasks', 'send raw folder', 'send final folder'].includes(t)) return true;
+  return parseStatusCommand(body) != null;
+}
+
+// Records the reason an editor gave after tapping the Blocked button and relays
+// it to the owners. The task is already in the blocked state at this point.
+async function applyBlockReason(editor, taskId, title, reason) {
+  try {
+    await db.updateTaskStatus(taskId, 'blocked', { blocked_reason: reason });
+  } catch (err) {
+    console.warn('[Editor] Could not store block reason:', err.message);
+  }
+  await sendToOwners(
+    `🚫 *Block Reason — ${title}*\n\n` +
+    `Employee: *${editor.name}*\n` +
+    `Reason: _${reason}_`
+  );
+  await sendMessage(editor.telegram_id, `✅ Thanks — I've passed your reason on to the owners.`);
 }
 
 // Figures out WHICH task an update applies to.
@@ -164,26 +205,31 @@ async function handleStatusUpdate(editor, cmd, quotedMsgId) {
   }
 
   if (status === 'completed') {
-    await completeTask(editor, task);
-    await sendMessage(editor.telegram_id, `🎉 Great work! *${fmt.taskTitle(task)}* marked as Completed.`);
+    // Approval flow: "done" submits the work for owner review, it isn't completed yet.
+    if (task.status === 'submitted_for_review') {
+      await sendMessage(
+        editor.telegram_id,
+        `📤 *${fmt.taskTitle(task)}* is already submitted and waiting for owner approval.`
+      );
+      return;
+    }
+    await submitForReviewFlow(editor, task, { hasFile: false });
+    await sendMessage(
+      editor.telegram_id,
+      `📤 Submitted *${fmt.taskTitle(task)}* for owner review. You'll be notified once it's approved or if changes are requested.`
+    );
     return;
   }
 }
 
-// Marks a task completed and notifies the owners. Mentions the deliverable file
-// when one was submitted (it will already have been forwarded to the owners).
-// Shared by the "done" text command and the file-with-"done"-caption flow.
-async function completeTask(editor, task) {
-  await db.updateTaskStatus(task.id, 'completed');
-  const title = fmt.taskTitle(task);
-  await sendToOwners(
-    `✅ *Task Completed!*\n\n` +
-    `Employee: *${editor.name}*\n` +
-    `Task: *${title}*\n` +
-    `Type: ${fmt.fmtType(task.type)}\n` +
-    `Deadline was: ${fmt.fmtDeadline(task.deadline)}` +
-    (task.deliverable_file_id ? `\n\n📎 Final file shared above.` : ``)
-  );
+// Moves a task into the owner-review state and alerts the owners with Approve /
+// Request Changes buttons. When `hasFile` is true the deliverable file was just
+// forwarded to the owners carrying those buttons itself, so we skip the text ping
+// to avoid a duplicate. Shared by the "done" text command and file-with-"done".
+async function submitForReviewFlow(editor, task, { hasFile }) {
+  await assignments.submitForReview(task);
+  if (hasFile) return;
+  await assignments.notifyOwnersOfSubmission(editor, task);
 }
 
 // ── File / deliverable uploads ──────────────────────────────────────────────
@@ -207,19 +253,22 @@ async function handleEditorFile(editor, file, quotedMsgId) {
   const linkable = !!task && resolved.error !== 'already_done';
   const title = task ? fmt.taskTitle(task) : null;
 
-  // 1) Always forward the file to the owners — the core requirement.
+  // 1) Always forward the file to the owners — the core requirement. When the
+  //    file is linked to a task, attach Approve / Request Changes buttons so an
+  //    owner can act on the deliverable straight from the file message.
   let ownerCaption = `📎 *File from ${editor.name}*`;
   if (title) ownerCaption += `\n📋 Task: *${title}*`;
   if (note) ownerCaption += `\n📝 _${note}_`;
-  if (wantsComplete && linkable) ownerCaption += `\n✅ Marked *Completed* by employee.`;
-  const forwarded = await sendFileToOwners({ fileId, fileType, caption: ownerCaption });
+  if (wantsComplete && linkable) ownerCaption += `\n📤 *Submitted for review* by employee.`;
+  const replyMarkup = linkable ? kb.ownerReviewButtons(task.id) : undefined;
+  const forwarded = await sendFileToOwners({ fileId, fileType, caption: ownerCaption, replyMarkup });
 
   // 2) Record it as the task's deliverable + the per-owner message ids, so an
   //    owner can reply to the file to request changes (best-effort — cols may be new).
   if (linkable) {
     try {
       await db.setTaskDeliverable(task.id, { fileId, fileType, fileName });
-      task.deliverable_file_id = fileId; // so completeTask() mentions it
+      task.deliverable_file_id = fileId; // so the submission notice mentions it
       const ownerMsgs = {};
       for (const f of forwarded) if (f.messageId != null) ownerMsgs[f.ownerId] = f.messageId;
       if (Object.keys(ownerMsgs).length) await db.setTaskDeliverableOwnerMsgs(task.id, ownerMsgs);
@@ -228,12 +277,12 @@ async function handleEditorFile(editor, file, quotedMsgId) {
     }
   }
 
-  // 3) If the caption said "done", complete the task too.
+  // 3) If the caption said "done", submit the task for owner review.
   if (wantsComplete && linkable) {
-    await completeTask(editor, task);
+    await submitForReviewFlow(editor, task, { hasFile: true });
     await sendMessage(
       editor.telegram_id,
-      `🎉 Got your file and forwarded it to the owners — *${title}* is now marked *Completed*. Great work!`
+      `📤 Got your file and forwarded it to the owners — *${title}* is now *Submitted for Review*. You'll hear back once it's approved or if changes are needed.`
     );
     return;
   }
