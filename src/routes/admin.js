@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const crypto = require('crypto');
 const db = require('../db/supabase');
 const fmt = require('../services/formatters');
@@ -23,7 +23,7 @@ const TYPES = [
 ];
 const STATUSES = ['pending', 'in_progress', 'blocked', 'submitted_for_review', 'completed'];
 
-// â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Auth ───────────────────────────────────────────────────────────────────────
 function timingSafeEqual(a, b) {
   const ab = Buffer.from(a);
   const bb = Buffer.from(b);
@@ -49,13 +49,13 @@ router.use(requireAuth);
 
 // Dynamic HTML: let the browser keep a copy but revalidate every time. Combined
 // with Express's automatic ETag on string bodies, an unchanged page returns a
-// bodiless 304 — saving the phone from re-sending the whole page on a revisit.
+// bodiless 304 - saving the phone from re-sending the whole page on a revisit.
 router.use((_req, res, next) => {
   res.set('Cache-Control', 'no-cache');
   next();
 });
 
-// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Helpers ──────────────────────────────────────────────────────────────────────
 function esc(str) {
   return String(str == null ? '' : str)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -79,7 +79,7 @@ function typeBadge(type) {
 
 function roleBadges(roles) {
   const arr = Array.isArray(roles) ? roles : (roles ? [roles] : []);
-  if (!arr.length) return '<span class="badge no-dl">â€”</span>';
+  if (!arr.length) return '<span class="badge no-dl">—</span>';
   const cls = { editor: 'type-edit', shoot: 'type-shoot', graphic_designer: 'type-gd', data_sorting: 'type-ds' };
   const lbl = { editor: 'Editor', shoot: 'Shoot', graphic_designer: 'Graphic Designer', data_sorting: 'Data Sorting' };
   return arr.map((r) => `<span class="badge ${cls[r] || 'both'}">${esc(lbl[r] || r)}</span>`).join(' ');
@@ -103,7 +103,7 @@ function page(title, activeNav, body, flash = '') {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Framex Admin â€” ${esc(title)}</title>
+  <title>Framex Admin — ${esc(title)}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -159,38 +159,38 @@ function taskRow(task, selectable = false) {
     <td>
       ${clientName ? `<div class="client-tag">${esc(clientName)}</div>` : ''}
       <strong>${esc(task.project_name)}</strong>
-      ${task.note ? `<div class="note">ðŸ“ ${esc(task.note)}</div>` : ''}
+      ${task.note ? `<div class="note">📝 ${esc(task.note)}</div>` : ''}
     </td>
     <td>${esc(employee)}</td>
     <td>${typeBadge(task.type)}</td>
     <td>
       ${fmt.fmtDeadline(task.deadline)}
-      ${isOverdue(task) ? '<div class="overdue-flag">âš  OVERDUE</div>' : ''}
+      ${isOverdue(task) ? '<div class="overdue-flag">⚠ OVERDUE</div>' : ''}
     </td>
     <td>${statusBadge(task.status)}</td>
     <td>${statusForm(task)}</td>
   </tr>`;
 }
 
-// â”€â”€ Changes / Revisions helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Changes / Revisions helpers ─────────────────────────────────────────────────
 // Reopened revision rounds keep status 'in_progress' in the DB but read as
-// "Changes" here so the lifecycle (delivered â†’ changes â†’ done) is visible.
+// "Changes" here so the lifecycle (delivered → changes → done) is visible.
 function changeStatusBadge(task) {
   if (task.status === 'completed') return statusBadge('completed');
   if (task.status === 'submitted_for_review') {
     return task.revision_count > 0
-      ? `<span class="badge st-review">ðŸ“¤ In Review Â· Rev ${task.revision_count}</span>`
+      ? `<span class="badge st-review">📤 In Review · Rev ${task.revision_count}</span>`
       : statusBadge('submitted_for_review');
   }
-  if (task.revision_count > 0) return `<span class="badge st-changes">ðŸ” Changes Â· Rev ${task.revision_count}</span>`;
+  if (task.revision_count > 0) return `<span class="badge st-changes">🔁 Changes · Rev ${task.revision_count}</span>`;
   return statusBadge(task.status);
 }
 
 function fileRef(task) {
   if (!task.deliverable_file_id) return '<span class="badge no-dl">No file</span>';
   const name = task.deliverable_file_name || `(${task.deliverable_file_type || 'file'})`;
-  return `<div class="mono">ðŸ“Ž ${esc(name)}</div>
-    <div class="note">${esc(task.deliverable_file_type || '')}${task.deliverable_uploaded_at ? ' Â· ' + fmtDateTime(task.deliverable_uploaded_at) : ''}</div>`;
+  return `<div class="mono">📎 ${esc(name)}</div>
+    <div class="note">${esc(task.deliverable_file_type || '')}${task.deliverable_uploaded_at ? ' · ' + fmtDateTime(task.deliverable_uploaded_at) : ''}</div>`;
 }
 
 function changeRow(task) {
@@ -199,7 +199,7 @@ function changeRow(task) {
   const notCompleted = task.status !== 'completed';
   const approveForm = notCompleted
     ? `<form method="POST" action="/admin/changes/${task.id}/approve" style="margin-top:6px">
-         <button class="ghost" type="submit">âœ… Approve</button>
+         <button class="ghost" type="submit">✅ Approve</button>
        </form>`
     : '';
   return `<tr>
@@ -210,7 +210,7 @@ function changeRow(task) {
     <td>${esc(employee)}</td>
     <td>${fileRef(task)}</td>
     <td>${changeStatusBadge(task)}</td>
-    <td>${task.revision_notes ? `<div class="note">ðŸ“ ${esc(task.revision_notes)}</div>` : '<span class="badge no-dl">â€”</span>'}</td>
+    <td>${task.revision_notes ? `<div class="note">📝 ${esc(task.revision_notes)}</div>` : '<span class="badge no-dl">—</span>'}</td>
     <td>
       <form method="POST" action="/admin/changes/${task.id}/request" class="changes-form">
         <textarea name="notes" placeholder="What needs to change?" required></textarea>
@@ -221,7 +221,7 @@ function changeRow(task) {
   </tr>`;
 }
 
-// Row for the "Awaiting Your Approval" queue â€” work an employee has submitted.
+// Row for the "Awaiting Your Approval" queue — work an employee has submitted.
 function approvalRow(task) {
   const employee = task.editors?.name || 'Unassigned';
   const clientName = task.clients?.name;
@@ -230,38 +230,38 @@ function approvalRow(task) {
     <td>
       ${clientName ? `<div class="client-tag">${esc(clientName)}</div>` : ''}
       <strong>${esc(task.project_name)}</strong> ${typeBadge(task.type)}
-      ${task.revision_count ? `<div class="note">ðŸ” Revision ${task.revision_count}</div>` : ''}
+      ${task.revision_count ? `<div class="note">🔁 Revision ${task.revision_count}</div>` : ''}
     </td>
     <td>${esc(employee)}</td>
     <td>${fileRef(task)}</td>
-    <td style="font-size:0.8rem;color:var(--muted-fg)">${submitted ? fmtDateTime(submitted) : 'â€”'}</td>
+    <td style="font-size:0.8rem;color:var(--muted-fg)">${submitted ? fmtDateTime(submitted) : '—'}</td>
     <td>
       <form method="POST" action="/admin/changes/${task.id}/approve">
-        <button type="submit">âœ… Approve</button>
+        <button type="submit">✅ Approve</button>
       </form>
       <form method="POST" action="/admin/changes/${task.id}/request" class="changes-form" style="margin-top:8px">
-        <textarea name="notes" placeholder="Or describe what needs to changeâ€¦" required></textarea>
-        <button class="ghost" type="submit">ðŸ” Request Changes</button>
+        <textarea name="notes" placeholder="Or describe what needs to change…" required></textarea>
+        <button class="ghost" type="submit">🔁 Request Changes</button>
       </form>
     </td>
   </tr>`;
 }
 
-// â”€â”€ Employee sheet helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Employee sheet helpers ────────────────────────────────────────────────────────
 function fmtTurnaround(hours) {
-  if (hours == null) return 'â€”';
+  if (hours == null) return '—';
   if (hours < 1) return `${Math.round(hours * 60)}m`;
   if (hours < 24) return `${hours.toFixed(1)}h`;
   return `${(hours / 24).toFixed(1)}d`;
 }
 
 function fmtDateTime(ts) {
-  if (!ts) return 'â€”';
+  if (!ts) return '—';
   return new Date(ts).toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function onTimeRateCell(rate) {
-  if (rate == null) return '<span class="badge no-dl">â€”</span>';
+  if (rate == null) return '<span class="badge no-dl">—</span>';
   const cls = rate >= 80 ? 'rate-good' : rate >= 50 ? 'rate-warn' : 'rate-bad';
   return `<span class="${cls}">${rate}%</span>`;
 }
@@ -290,7 +290,7 @@ function workloadSnapshot(active, overdueCount) {
     ? `<div class="wl-bar">${segs.filter((s) => s.n > 0).map((s) =>
         `<div class="wl-seg" style="flex-grow:${s.n};flex-basis:0;background:${s.color}" title="${s.label}: ${s.n}">${s.n}</div>`
       ).join('')}</div>`
-    : `<div class="wl-empty">No active work right now â€” the team is clear.</div>`;
+    : `<div class="wl-empty">No active work right now — the team is clear.</div>`;
 
   const legend = segs.map((s) =>
     `<span class="wl-item"><span class="wl-dot" style="background:${s.color}"></span>${s.label} <strong>${s.n}</strong></span>`
@@ -307,7 +307,7 @@ function workloadSnapshot(active, overdueCount) {
   </div>`;
 }
 
-// â”€â”€ Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Dashboard ─────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
     const [active, overdue, completedToday, editors, thisWeek, thisMonth, history] = await Promise.all([
@@ -336,7 +336,7 @@ router.get('/', async (req, res) => {
 
     const activeRows = active.length
       ? active.map(taskRow).join('')
-      : `<tr><td colspan="6" class="empty">No active tasks. <a href="/admin/assign">Assign work â†’</a></td></tr>`;
+      : `<tr><td colspan="6" class="empty">No active tasks. <a href="/admin/assign">Assign work →</a></td></tr>`;
 
     const historyRows = history.length
       ? history.map((t) => `<tr>
@@ -364,7 +364,7 @@ router.get('/', async (req, res) => {
         </table>
       </div>
       <div class="card">
-        <h2>Previous Work <a class="section-link" href="/admin/performance">â†’ Performance</a></h2>
+        <h2>Previous Work <a class="section-link" href="/admin/performance">→ Performance</a></h2>
         <table>
           <thead><tr><th>Work</th><th>Done By</th><th>Type</th><th>Started At</th><th>Deadline</th><th>Completed At</th><th>Result</th></tr></thead>
           <tbody>${historyRows}</tbody>
@@ -377,7 +377,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// â”€â”€ Assign Work â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Assign Work ───────────────────────────────────────────────────────────────────
 router.get('/assign', async (req, res) => {
   let editors = [], counts = {}, clients = [], loadErr = '';
   try {
@@ -390,9 +390,9 @@ router.get('/assign', async (req, res) => {
   } catch (e) { loadErr = e.message; }
 
   const clientOpts = clients.length
-    ? `<option value="">â€” Select client (optional) â€”</option>` +
+    ? `<option value="">— Select client (optional) —</option>` +
       clients.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')
-    : `<option value="">No clients yet â€” add them in Clients tab</option>`;
+    : `<option value="">No clients yet — add them in Clients tab</option>`;
 
   const typeOpts = TYPES.map((t) => `<option value="${t.value}">${t.label}</option>`).join('');
 
@@ -400,7 +400,7 @@ router.get('/assign', async (req, res) => {
   const editorOpts = editors.length
     ? editors.map((e) => {
         const roleStr = Array.isArray(e.role) ? e.role.map((r) => roleLabel[r] || r).join(', ') : (e.role || '');
-        return `<option value="${e.id}">${esc(e.name)} [${esc(roleStr)}] â€” ${counts[e.id] || 0} active</option>`;
+        return `<option value="${e.id}">${esc(e.name)} [${esc(roleStr)}] — ${counts[e.id] || 0} active</option>`;
       }).join('')
     : '';
 
@@ -408,7 +408,7 @@ router.get('/assign', async (req, res) => {
     <div class="card">
       <h2>Assign New Work</h2>
       ${loadErr ? `<div class="flash err">Could not load data: ${esc(loadErr)}</div>` : ''}
-      ${!editors.length && !loadErr ? `<div class="flash err">No active employees yet. <a href="/admin/employees">Add one first â†’</a></div>` : ''}
+      ${!editors.length && !loadErr ? `<div class="flash err">No active employees yet. <a href="/admin/employees">Add one first →</a></div>` : ''}
       <form method="POST" action="/admin/assign">
         <div class="grid">
           <label>
@@ -435,7 +435,7 @@ router.get('/assign', async (req, res) => {
             <input type="datetime-local" name="deadline">
           </label>
           <label class="full">
-            Note to Employee <span class="hint">(optional â€” sent with the assignment on Telegram)</span>
+            Note to Employee <span class="hint">(optional — sent with the assignment on Telegram)</span>
             <textarea name="note" placeholder="e.g. Keep it under 60s, use the new brand LUT, deliver vertical 9:16."></textarea>
           </label>
         </div>
@@ -464,13 +464,13 @@ router.post('/assign', async (req, res) => {
       clientId: clientId || null,
     });
 
-    res.redirect('/admin?ok=' + encodeURIComponent(`Assigned "${projectName.trim()}" to ${editor.name} â€” notified on Telegram.`));
+    res.redirect('/admin?ok=' + encodeURIComponent(`Assigned "${projectName.trim()}" to ${editor.name} — notified on Telegram.`));
   } catch (e) {
     res.redirect('/admin/assign?error=' + encodeURIComponent(e.message));
   }
 });
 
-// â”€â”€ Tasks list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Tasks list ────────────────────────────────────────────────────────────────────
 router.get('/tasks', async (req, res) => {
   try {
     const [active, editors] = await Promise.all([db.getAllActiveTasks(), db.getAllEditors()]);
@@ -480,7 +480,7 @@ router.get('/tasks', async (req, res) => {
 
     const roleLabel = { editor: 'Editor', shoot: 'Shoot', graphic_designer: 'Graphic Designer', data_sorting: 'Data Sorting' };
     const editorOpts = editors.length
-      ? `<option value="">â€” Employee â€”</option>` + editors.map((e) => {
+      ? `<option value="">— Employee —</option>` + editors.map((e) => {
           const roleStr = Array.isArray(e.role) ? e.role.map((r) => roleLabel[r] || r).join(', ') : (e.role || '');
           return `<option value="${e.id}">${esc(e.name)}${roleStr ? ` [${esc(roleStr)}]` : ''}</option>`;
         }).join('')
@@ -488,7 +488,7 @@ router.get('/tasks', async (req, res) => {
 
     // The bulk form lives outside the table; row checkboxes associate to it via
     // form="bulkForm". Each button overrides the action with formaction so one set
-    // of selected tasks can drive several operations. Server-rendered throughout â€”
+    // of selected tasks can drive several operations. Server-rendered throughout —
     // the small script only adds the select-all convenience.
     const bulkBar = active.length ? `
       <form id="bulkForm" method="POST" action="/admin/tasks/bulk/complete" class="bulk-bar">
@@ -549,7 +549,7 @@ router.get('/tasks', async (req, res) => {
   }
 });
 
-// â”€â”€ Bulk task actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Bulk task actions ─────────────────────────────────────────────────────────
 // Normalises the posted taskIds (single value arrives as a string), loads the
 // joined task rows, and delegates to the shared bulk helpers in assignments.js.
 function parseTaskIds(body) {
@@ -621,7 +621,7 @@ router.post('/tasks/:id/status', async (req, res) => {
   }
 });
 
-// â”€â”€ Changes / Revisions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Changes / Revisions ─────────────────────────────────────────────────────────
 router.get('/changes', async (req, res) => {
   try {
     const [awaiting, tasks] = await Promise.all([
@@ -649,7 +649,7 @@ router.get('/changes', async (req, res) => {
       <div class="card">
         <h2>All Delivered Files</h2>
         <p style="font-size:0.85rem;color:var(--muted-fg);margin-bottom:16px">
-          Every file your editors have delivered. <strong>Request Changes</strong> reopens the task â€” the editor is notified on Telegram with your notes and the round is tracked as a revision (status shows <span class="badge st-changes">ðŸ” Changes</span>). When you're happy, <strong>Approve</strong>.
+          Every file your editors have delivered. <strong>Request Changes</strong> reopens the task — the editor is notified on Telegram with your notes and the round is tracked as a revision (status shows <span class="badge st-changes">🔁 Changes</span>). When you're happy, <strong>Approve</strong>.
         </p>
         <table>
           <thead><tr><th>Work</th><th>Employee</th><th>Reference File</th><th>Status</th><th>Latest Notes</th><th>Action</th></tr></thead>
@@ -659,7 +659,7 @@ router.get('/changes', async (req, res) => {
     res.send(page('Changes', 'changes', body, flashFrom(req.query)));
   } catch (e) {
     const hint = /deliverable|revision|column/i.test(e.message)
-      ? ' â€” run the deliverable + revision DB migrations (see src/db/schema.sql) to enable this tab.'
+      ? ' — run the deliverable + revision DB migrations (see src/db/schema.sql) to enable this tab.'
       : '';
     res.send(page('Changes', 'changes', '', `<div class="flash err">Could not load change requests: ${esc(e.message)}${hint}</div>`));
   }
@@ -683,7 +683,7 @@ router.post('/changes/:id/approve', async (req, res) => {
     const task = await db.getTaskById(req.params.id);
     if (!task) throw new Error('Task not found.');
     await approveTask(task, 'Admin Portal');
-    res.redirect('/admin/changes?ok=' + encodeURIComponent(`Approved "${task.project_name}" â€” marked Completed.`));
+    res.redirect('/admin/changes?ok=' + encodeURIComponent(`Approved "${task.project_name}" — marked Completed.`));
   } catch (e) {
     res.redirect('/admin/changes?error=' + encodeURIComponent(e.message));
   }
@@ -694,7 +694,7 @@ router.post('/changes/:id/done', (req, res) => {
   res.redirect(307, `/admin/changes/${req.params.id}/approve`);
 });
 
-// â”€â”€ Employees (management) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Employees (management) ────────────────────────────────────────────────────────
 router.get('/employees', async (req, res) => {
   let employees = [], fetchError = '';
   try {
@@ -783,7 +783,7 @@ router.post('/employees/:id/toggle', async (req, res) => {
 // Keep old /editors URL alive with a redirect so any saved bookmarks work
 router.get('/editors', (req, res) => res.redirect(301, '/admin/employees'));
 
-// â”€â”€ Performance (was Employee Sheet) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Performance (was Employee Sheet) ─────────────────────────────────────────────
 router.get('/performance', async (req, res) => {
   try {
     const stats = await db.getEmployeeStats();
@@ -800,7 +800,7 @@ router.get('/performance', async (req, res) => {
         <div class="stat"><div class="num">${activeEmployees}</div><div class="lbl">Active Employees</div></div>
         <div class="stat"><div class="num">${totalAssigned}</div><div class="lbl">Total Assigned</div></div>
         <div class="stat good"><div class="num">${totalCompleted}</div><div class="lbl">Total Completed</div></div>
-        <div class="stat good"><div class="num">${overallRate != null ? overallRate + '%' : 'â€”'}</div><div class="lbl">Overall On-Time Rate</div></div>
+        <div class="stat good"><div class="num">${overallRate != null ? overallRate + '%' : '—'}</div><div class="lbl">Overall On-Time Rate</div></div>
       </div>`;
 
     const rows = stats.length
@@ -819,15 +819,15 @@ router.get('/performance', async (req, res) => {
             <td style="font-size:0.8rem;color:var(--muted-fg)">${fmtDateTime(s.lastStartedAt)}</td>
           </tr>`;
         }).join('')
-      : `<tr><td colspan="10" class="empty">No employees yet. <a href="/admin/employees">Add one â†’</a></td></tr>`;
+      : `<tr><td colspan="10" class="empty">No employees yet. <a href="/admin/employees">Add one →</a></td></tr>`;
 
     const body = `
       ${summaryStats}
       <div class="card">
         <h2>Employee Performance</h2>
         <p style="font-size:0.8rem;color:var(--muted-fg);margin-bottom:16px">
-          <strong>On-Time Rate</strong> = completed before deadline Ã· total completed with a deadline.
-          <strong>Avg Turnaround</strong> = started â†’ completed (tasks with both timestamps).
+          <strong>On-Time Rate</strong> = completed before deadline ÷ total completed with a deadline.
+          <strong>Avg Turnaround</strong> = started → completed (tasks with both timestamps).
         </p>
         <table>
           <thead>
@@ -852,7 +852,7 @@ router.get('/performance', async (req, res) => {
   }
 });
 
-// â”€â”€ Clients â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Clients ───────────────────────────────────────────────────────────────────────
 router.get('/clients', async (req, res) => {
   let clients = [], fetchError = '';
   try {
