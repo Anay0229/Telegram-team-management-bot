@@ -49,11 +49,19 @@ create table if not exists tasks (
   revision_count int not null default 0, -- how many change-request rounds this task has had
   revision_notes text,                   -- latest change request from the owner/client
   revision_requested_at timestamptz,     -- when the latest changes were requested
+  initial_deadline timestamptz,          -- the ORIGINAL deadline, set once at assignment, never overwritten
+  first_submitted_at timestamptz,        -- when the task first entered submitted_for_review (1st delivery)
+  review_log jsonb not null default '[]'::jsonb, -- one entry per delivery round (see shape below)
   started_at    timestamptz,             -- set on first transition to in_progress
   deadline_notified_at timestamptz,      -- last past-deadline nudge timestamp
   created_at    timestamptz not null default now(),
   completed_at  timestamptz
 );
+-- review_log entry shape (one per delivery round):
+--   { "round": 0, "deadline": "<iso|null>", "submitted_at": "<iso>",
+--     "on_time": true, "changes_requested_at": "<iso|null>", "notes": "<text|null>" }
+-- round = revision_count at submission time (0 = initial delivery, 1+ = revision deliveries).
+-- on_time = submitted_at <= deadline (null when no deadline applied to that round).
 
 create index if not exists tasks_assigned_to_idx on tasks(assigned_to);
 create index if not exists tasks_status_idx      on tasks(status);
@@ -82,6 +90,20 @@ create index if not exists tasks_client_id_idx   on tasks(client_id);
 --   alter table tasks add column if not exists revision_count int not null default 0;
 --   alter table tasks add column if not exists revision_notes text;
 --   alter table tasks add column if not exists revision_requested_at timestamptz;
+
+-- ── Migration: work-record lifecycle history ──────────────────────────────────
+-- If you already created the tasks table before the per-task history view, run:
+--
+--   alter table tasks add column if not exists initial_deadline timestamptz;
+--   alter table tasks add column if not exists first_submitted_at timestamptz;
+--   alter table tasks add column if not exists review_log jsonb not null default '[]'::jsonb;
+--   -- Backfill original deadline for tasks that never went through a revision:
+--   update tasks set initial_deadline = deadline
+--     where initial_deadline is null and coalesce(revision_count, 0) = 0;
+--
+-- Until this runs, the bot degrades gracefully: submissions/revisions skip the
+-- history writes (best-effort), the dashboard shows "Not recorded", and the task
+-- detail page falls back to the scalar columns it still has.
 
 -- ── Migration: approval flow (submitted_for_review status) ─────────────────────
 -- If you already created the tasks table before the approval feature, the status

@@ -133,8 +133,12 @@ function flashFrom(query) {
   return out;
 }
 
+// Work that's been submitted for review (or completed) isn't overdue — the
+// employee delivered on time; the deadline no longer applies once it's in review.
 function isOverdue(task) {
-  return task.deadline && task.status !== 'completed' && new Date(task.deadline) < new Date();
+  if (!task.deadline) return false;
+  if (task.status === 'completed' || task.status === 'submitted_for_review') return false;
+  return new Date(task.deadline) < new Date();
 }
 
 function statusForm(task) {
@@ -158,7 +162,7 @@ function taskRow(task, selectable = false) {
     ${checkCell}
     <td>
       ${clientName ? `<div class="client-tag">${esc(clientName)}</div>` : ''}
-      <strong>${esc(task.project_name)}</strong>
+      <a class="row-link" href="/admin/tasks/${task.id}"><strong>${esc(task.project_name)}</strong></a>
       ${task.note ? `<div class="note">📝 ${esc(task.note)}</div>` : ''}
     </td>
     <td>${esc(employee)}</td>
@@ -214,6 +218,8 @@ function changeRow(task) {
     <td>
       <form method="POST" action="/admin/changes/${task.id}/request" class="changes-form">
         <textarea name="notes" placeholder="What needs to change?" required></textarea>
+        <small style="color:var(--muted-fg);font-size:.72rem;margin-bottom:-4px">Revision deadline (optional)</small>
+        <input type="datetime-local" name="reviewDeadline" style="font-size:.8rem">
         <button type="submit">Request Changes</button>
       </form>
       ${approveForm}
@@ -241,6 +247,8 @@ function approvalRow(task) {
       </form>
       <form method="POST" action="/admin/changes/${task.id}/request" class="changes-form" style="margin-top:8px">
         <textarea name="notes" placeholder="Or describe what needs to change…" required></textarea>
+        <small style="color:var(--muted-fg);font-size:.72rem;margin-bottom:-4px">Revision deadline (optional)</small>
+        <input type="datetime-local" name="reviewDeadline" style="font-size:.8rem">
         <button class="ghost" type="submit">🔁 Request Changes</button>
       </form>
     </td>
@@ -270,6 +278,76 @@ function completionBadge(task) {
   if (!task.deadline) return '<span class="badge no-dl">No Deadline</span>';
   const late = task.completed_at && new Date(task.completed_at) > new Date(task.deadline);
   return late ? '<span class="badge late">Late</span>' : '<span class="badge on-time">On Time</span>';
+}
+
+// Was the employee's FIRST delivery on time? Compares first_submitted_at against
+// the original deadline (initial_deadline). Falls back to the live deadline for
+// never-revised rows where the migration's backfill applies; otherwise "Not
+// recorded" for tasks predating the history feature.
+function firstSubmissionBadge(task) {
+  const submitted = task.first_submitted_at;
+  const deadline = task.initial_deadline || (task.revision_count ? null : task.deadline);
+  if (!submitted || !deadline) return '<span class="badge no-dl">Not recorded</span>';
+  const late = new Date(submitted) > new Date(deadline);
+  return late ? '<span class="badge late">Late</span>' : '<span class="badge on-time">On Time</span>';
+}
+
+// ── Task detail timeline (per-task lifecycle) ────────────────────────────────────
+function tlOnTimeBadge(entry) {
+  if (entry.on_time == null) return '<span class="badge no-dl">No Deadline</span>';
+  return entry.on_time ? '<span class="badge on-time">On Time</span>' : '<span class="badge late">Late</span>';
+}
+
+function tlItem(label, time, body, tone = '') {
+  return `<div class="tl-item${tone ? ' ' + tone : ''}">
+    <div class="tl-dot"></div>
+    <div class="tl-body">
+      <div class="tl-label">${esc(label)}${time && time !== '—' ? `<span class="tl-time">${time}</span>` : ''}</div>
+      ${body ? `<div class="tl-detail">${body}</div>` : ''}
+    </div>
+  </div>`;
+}
+
+// Builds the vertical lifecycle timeline for a single task. Reads review_log when
+// present; otherwise degrades to the scalar columns for older tasks.
+function renderTaskTimeline(task) {
+  const items = [];
+
+  // 1. Assigned — with the ORIGINAL deadline the work was given.
+  const initial = task.initial_deadline || (task.revision_count ? null : task.deadline);
+  items.push(tlItem('Assigned', fmtDateTime(task.created_at), `Initial deadline: <strong>${fmt.fmtDeadline(initial)}</strong>`));
+
+  // 2. Started
+  if (task.started_at) items.push(tlItem('Started', fmtDateTime(task.started_at), ''));
+
+  // 3. Each delivery round (+ any change request that followed it).
+  const log = Array.isArray(task.review_log) ? task.review_log : [];
+  if (log.length) {
+    log.forEach((entry) => {
+      const label = entry.round === 0 ? 'First Submission' : `Resubmission · Rev ${entry.round}`;
+      items.push(tlItem(label, fmtDateTime(entry.submitted_at),
+        `Round deadline: <strong>${fmt.fmtDeadline(entry.deadline)}</strong> &nbsp; ${tlOnTimeBadge(entry)}`, 'good'));
+      if (entry.changes_requested_at) {
+        items.push(tlItem('Changes Requested', fmtDateTime(entry.changes_requested_at),
+          entry.notes ? `<div class="note">📝 ${esc(entry.notes)}</div>` : '', 'accent'));
+      }
+    });
+  } else {
+    items.push(`<div class="note" style="margin:4px 0 12px">Round-by-round history wasn't recorded for this task (created before the work-record update). Showing what's available.</div>`);
+    if (task.revision_count) {
+      items.push(tlItem('Revisions', fmtDateTime(task.revision_requested_at),
+        `${task.revision_count} round${task.revision_count > 1 ? 's' : ''} requested.${task.revision_notes ? `<div class="note">📝 ${esc(task.revision_notes)}</div>` : ''}`, 'accent'));
+    }
+  }
+
+  // 4. Final outcome.
+  if (task.status === 'completed') {
+    items.push(tlItem('Approved & Completed', fmtDateTime(task.completed_at), statusBadge('completed'), 'good'));
+  } else {
+    items.push(tlItem('Current Status', '', statusBadge(task.status), task.status === 'blocked' ? 'accent' : ''));
+  }
+
+  return `<div class="timeline">${items.join('')}</div>`;
 }
 
 // A segmented bar visualising how the active workload breaks down by status,
@@ -342,14 +420,14 @@ router.get('/', async (req, res) => {
       ? history.map((t) => `<tr>
           <td>
             ${t.clients?.name ? `<div class="client-tag">${esc(t.clients.name)}</div>` : ''}
-            <strong>${esc(t.project_name)}</strong>
+            <a class="row-link" href="/admin/tasks/${t.id}"><strong>${esc(t.project_name)}</strong></a>
           </td>
           <td>${esc(t.editors?.name || 'Unknown')}</td>
           <td>${typeBadge(t.type)}</td>
           <td style="font-size:0.8rem">${fmtDateTime(t.started_at)}</td>
-          <td style="font-size:0.8rem">${fmt.fmtDeadline(t.deadline)}</td>
-          <td style="font-size:0.8rem">${fmtDateTime(t.completed_at)}</td>
-          <td>${completionBadge(t)}</td>
+          <td style="font-size:0.8rem">${fmtDateTime(t.first_submitted_at || t.deliverable_uploaded_at)}</td>
+          <td>${firstSubmissionBadge(t)}</td>
+          <td>${statusBadge(t.status)}<div style="font-size:0.75rem;color:var(--muted-fg);margin-top:6px">${fmtDateTime(t.completed_at)}</div></td>
         </tr>`).join('')
       : `<tr><td colspan="7" class="empty">No completed tasks yet.</td></tr>`;
 
@@ -365,15 +443,113 @@ router.get('/', async (req, res) => {
       </div>
       <div class="card">
         <h2>Previous Work <a class="section-link" href="/admin/performance">→ Performance</a></h2>
+        <p style="font-size:0.85rem;color:var(--muted-fg);margin-bottom:16px">Showing the 1st submission and final outcome. <strong>Click any work</strong> to see its full lifecycle — initial deadline, every review round, and approval.</p>
         <table>
-          <thead><tr><th>Work</th><th>Done By</th><th>Type</th><th>Started At</th><th>Deadline</th><th>Completed At</th><th>Result</th></tr></thead>
+          <thead><tr><th>Work</th><th>Done By</th><th>Type</th><th>Started</th><th>1st Submitted</th><th>1st Result</th><th>Final</th></tr></thead>
           <tbody>${historyRows}</tbody>
         </table>
+        <p style="font-size:0.78rem;color:var(--muted-fg);margin-top:18px">
+          🧪 Testing: <a class="row-link" href="/admin/test/seed-history">Seed a demo task</a> (full lifecycle) · <a class="row-link" href="/admin/test/cleanup">Clear test data</a>
+        </p>
       </div>`;
 
     res.send(page('Dashboard', 'dashboard', body, flashFrom(req.query)));
   } catch (e) {
     res.send(page('Dashboard', 'dashboard', '', `<div class="flash err">Could not load dashboard: ${esc(e.message)}</div>`));
+  }
+});
+
+// ── Task detail — full lifecycle timeline ───────────────────────────────────────
+router.get('/tasks/:id', async (req, res) => {
+  try {
+    const task = await db.getTaskById(req.params.id);
+    if (!task) {
+      return res.send(page('Task', 'tasks', '', `<div class="flash err">Task not found.</div>`));
+    }
+    const clientName = task.clients?.name;
+    const title = clientName ? `${clientName} — ${task.project_name}` : task.project_name;
+    const body = `
+      <p style="margin-bottom:20px"><a class="row-link" href="/admin">← Back to Dashboard</a></p>
+      <div class="card">
+        <h2>${esc(task.project_name)}</h2>
+        <div class="task-meta">
+          ${clientName ? `<span class="client-tag" style="margin:0">${esc(clientName)}</span>` : ''}
+          ${typeBadge(task.type)}
+          <span>Employee: <strong>${esc(task.editors?.name || 'Unassigned')}</strong></span>
+          ${statusBadge(task.status)}
+        </div>
+        ${task.note ? `<div class="note">📝 ${esc(task.note)}</div>` : ''}
+        <h3 style="margin:28px 0 18px;font-size:1rem;letter-spacing:-0.01em">Lifecycle</h3>
+        ${renderTaskTimeline(task)}
+      </div>`;
+    res.send(page(title, 'tasks', body, flashFrom(req.query)));
+  } catch (e) {
+    res.send(page('Task', 'tasks', '', `<div class="flash err">Could not load task: ${esc(e.message)}</div>`));
+  }
+});
+
+// ── Test / demo endpoints ───────────────────────────────────────────────────────
+// Seed a fully-lived-out task (assigned → started → 1st delivery on time →
+// changes requested → late resubmission → approved) so the work-record history
+// and timeline can be exercised WITHOUT the Telegram bot. Drives the real db
+// functions (no Telegram notifications), then opens the new task's detail page.
+const TEST_PREFIX = 'TEST — ';
+router.get('/test/seed-history', async (req, res) => {
+  try {
+    const editors = await db.getAllEditors();
+    if (!editors.length) {
+      return res.redirect('/admin?error=' + encodeURIComponent('Add at least one employee first, then seed a test task.'));
+    }
+    const editor = editors[0];
+    const now = Date.now();
+    const initialDeadline = new Date(now + 2 * 24 * 60 * 60 * 1000).toISOString(); // +2 days → 1st submission on time
+    const reviewDeadline  = new Date(now - 6 * 60 * 60 * 1000).toISOString();        // 6h ago → resubmission late
+    // Tolerate the approval-status migration not being run — fall back to in_progress.
+    const toReview = async (id) => {
+      try { await db.updateTaskStatus(id, 'submitted_for_review'); }
+      catch { await db.updateTaskStatus(id, 'in_progress'); }
+    };
+
+    // 1) Assign
+    const task = await db.createTask({
+      projectName: `${TEST_PREFIX}Lifecycle Demo ${new Date().toLocaleTimeString('en-IN')}`,
+      type: 'edit',
+      assignedTo: editor.id,
+      deadline: initialDeadline,
+      driveLink: null,
+      note: 'Seeded by /admin/test/seed-history — safe to delete.',
+      clientId: null,
+    });
+    await db.markInitialDeadline(task.id, initialDeadline);
+
+    // 2) Started  3) First delivery (on time)
+    await db.updateTaskStatus(task.id, 'in_progress');
+    await toReview(task.id);
+    await db.recordSubmission(task.id);
+
+    // 4) Owner requests changes, with a (now past) review deadline
+    await db.stampReviewRoundChangeRequest(task.id, 'Tighten the intro and fix the audio levels.');
+    await db.setTaskRevision(task.id, { count: 1, notes: 'Tighten the intro and fix the audio levels.' });
+    await db.updateTaskStatus(task.id, 'in_progress', { deadline: reviewDeadline, completed_at: null, deadline_notified_at: null });
+
+    // 5) Late resubmission  6) Approved
+    await toReview(task.id);
+    await db.recordSubmission(task.id);
+    await db.updateTaskStatus(task.id, 'completed');
+
+    res.redirect(`/admin/tasks/${task.id}?ok=` + encodeURIComponent('Seeded a demo task with a full lifecycle. Use /admin/test/cleanup to remove test tasks.'));
+  } catch (e) {
+    res.redirect('/admin?error=' + encodeURIComponent(`Could not seed test task: ${e.message}`));
+  }
+});
+
+// Remove every seeded test task (project name starts with "TEST — ").
+router.get('/test/cleanup', async (req, res) => {
+  try {
+    const n = await db.deleteTasksByNamePrefix(TEST_PREFIX);
+    res.redirect('/admin?ok=' + encodeURIComponent(`Removed ${n} test task${n === 1 ? '' : 's'}.`));
+  } catch (e) {
+    res.redirect('/admin?error=' + encodeURIComponent(`Cleanup failed: ${e.message}`));
   }
 });
 
@@ -649,7 +825,7 @@ router.get('/changes', async (req, res) => {
       <div class="card">
         <h2>All Delivered Files</h2>
         <p style="font-size:0.85rem;color:var(--muted-fg);margin-bottom:16px">
-          Every file your editors have delivered. <strong>Request Changes</strong> reopens the task — the editor is notified on Telegram with your notes and the round is tracked as a revision (status shows <span class="badge st-changes">🔁 Changes</span>). When you're happy, <strong>Approve</strong>.
+          Every file your editors have delivered. <strong>Request Changes</strong> reopens the task — the editor is notified on Telegram with your notes and the round is tracked as a revision (status shows <span class="badge st-changes">🔁 Changes</span>). The original deadline applied only to the first delivery, so revisions stay open-ended (never overdue) unless you set a fresh <em>Revision deadline</em>. When you're happy, <strong>Approve</strong>.
         </p>
         <table>
           <thead><tr><th>Work</th><th>Employee</th><th>Reference File</th><th>Status</th><th>Latest Notes</th><th>Action</th></tr></thead>
@@ -666,12 +842,14 @@ router.get('/changes', async (req, res) => {
 });
 
 router.post('/changes/:id/request', async (req, res) => {
-  const { notes } = req.body;
+  const { notes, reviewDeadline } = req.body;
   try {
     if (!notes || !notes.trim()) throw new Error('Change notes are required.');
     const task = await db.getTaskById(req.params.id);
     if (!task) throw new Error('Task not found.');
-    await requestChanges(task, notes.trim(), 'Admin Portal');
+    // Optional deadline for the revision round — omit it and revisions stay open-ended.
+    const deadline = reviewDeadline && reviewDeadline.trim() ? parseDeadline(reviewDeadline.trim()) : null;
+    await requestChanges(task, notes.trim(), 'Admin Portal', deadline);
     res.redirect('/admin/changes?ok=' + encodeURIComponent(`Change request sent to ${task.editors?.name || 'the editor'} for "${task.project_name}".`));
   } catch (e) {
     res.redirect('/admin/changes?error=' + encodeURIComponent(e.message));

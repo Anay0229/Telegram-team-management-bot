@@ -234,6 +234,69 @@ async function setTaskRevision(taskId, { count, notes }) {
   if (error) throw error;
 }
 
+// Stamps the most recent review_log entry (the round being sent back) with when
+// and why changes were requested, so the task detail timeline shows the full
+// round-by-round story. Kept separate from setTaskRevision so a missing
+// review_log column never blocks the core revision metadata write.
+async function stampReviewRoundChangeRequest(taskId, notes) {
+  const { data: cur } = await supabase
+    .from('tasks').select('review_log').eq('id', taskId).single();
+  const log = Array.isArray(cur?.review_log) ? cur.review_log : [];
+  if (!log.length) return; // nothing delivered yet to stamp
+  const last = log[log.length - 1];
+  last.changes_requested_at = new Date().toISOString();
+  last.notes = notes;
+  const { error } = await supabase
+    .from('tasks')
+    .update({ review_log: log })
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
+// Sets a task's ORIGINAL deadline once, at assignment time. Never overwritten by
+// the revision flow, so the work-record history can always compare the first
+// submission against the deadline the work was actually given.
+async function markInitialDeadline(taskId, deadline) {
+  const { error } = await supabase
+    .from('tasks')
+    .update({ initial_deadline: deadline })
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
+// Records a delivery: stamps first_submitted_at (once) and appends a round entry
+// to review_log capturing the deadline that applied and whether it was on time.
+// round = revision_count at submission time (0 = initial delivery, 1+ = revisions).
+async function recordSubmission(taskId) {
+  const { data: cur } = await supabase
+    .from('tasks')
+    .select('deadline, revision_count, review_log, first_submitted_at')
+    .eq('id', taskId)
+    .single();
+
+  const now = new Date().toISOString();
+  const deadline = cur?.deadline || null;
+  const log = Array.isArray(cur?.review_log) ? cur.review_log : [];
+
+  log.push({
+    round: cur?.revision_count || 0,
+    deadline,
+    submitted_at: now,
+    on_time: deadline ? new Date(now) <= new Date(deadline) : null,
+    changes_requested_at: null,
+    notes: null,
+  });
+
+  const update = { review_log: log };
+  if (!cur?.first_submitted_at) update.first_submitted_at = now;
+
+  const { error } = await supabase
+    .from('tasks')
+    .update(update)
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
 // Finds active tasks by main-work description OR client name — used by the mark command.
 async function findActiveTasksByProjectName(name) {
   const { data: byWork, error: e1 } = await supabase
@@ -588,6 +651,18 @@ async function markTaskDeadlineNotified(taskId) {
   if (error) throw error;
 }
 
+// Deletes every task whose project_name starts with the given prefix — used by
+// the admin test endpoints to clean up seeded demo data. Returns the count removed.
+async function deleteTasksByNamePrefix(prefix) {
+  const { data, error } = await supabase
+    .from('tasks')
+    .delete()
+    .ilike('project_name', `${prefix}%`)
+    .select('id');
+  if (error) throw error;
+  return data ? data.length : 0;
+}
+
 module.exports = {
   createClient: createClient_,
   getAllClients,
@@ -610,6 +685,9 @@ module.exports = {
   setTaskDeliverableOwnerMsgs,
   getTaskByDeliverableOwnerMsg,
   setTaskRevision,
+  stampReviewRoundChangeRequest,
+  markInitialDeadline,
+  recordSubmission,
   findActiveTasksByProjectName,
   findTasksByProjectNameAnyStatus,
   getTasksWithDeliverable,
@@ -633,4 +711,5 @@ module.exports = {
   getEmployeeStats,
   getOverdueTasksNeedingEditorNotification,
   markTaskDeadlineNotified,
+  deleteTasksByNamePrefix,
 };

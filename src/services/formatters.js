@@ -159,7 +159,7 @@ function helpMenu(isOwner) {
       `*clients*\n  → List all available clients\n\n` +
       `*assign to [name]*\n  → Confirm employee after seeing load summary\n\n` +
       `*mark [project or client] [done | in progress | blocked | pending] [reason]*\n  → Set any task's status\n\n` +
-      `*changes [project or client] | [what to change]*\n  → Reopen a delivered task and send the editor revision notes\n  → _Or just reply to the editor's file with the notes_\n\n` +
+      `*changes [project or client] | [what to change] | [deadline (optional)]*\n  → Reopen a delivered task and send the editor revision notes\n  → _Revisions have no deadline unless you add one as a 3rd part_\n  → _Or just reply to the editor's file with the notes_\n\n` +
       `✅ *Approvals*\n  → When an employee submits work, you get *Approve* / *Request Changes* buttons. Approve completes it; Request Changes reopens it for a revision.\n\n` +
       `*team status*\n  → All employees and active tasks\n\n` +
       `*[employee name] status*\n  → Drill-down on specific employee\n\n` +

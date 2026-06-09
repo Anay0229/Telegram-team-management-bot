@@ -41,6 +41,14 @@ async function assignProject({ projectName, type, editor, deadline, note, source
     clientId: clientId || null,
   });
 
+  // Preserve the original deadline for the work-record history (best-effort —
+  // column may be new). The revision flow never touches initial_deadline.
+  try {
+    await db.markInitialDeadline(task.id, deadline);
+  } catch (err) {
+    console.warn('[Assign] Could not store initial deadline:', err.message);
+  }
+
   const sent = await sendMessage(
     editor.telegram_id,
     fmt.assignmentNotification(clientName, projectName, type, deadline, link, note),
@@ -101,13 +109,31 @@ async function changeTaskStatus(task, status, reason) {
 // Reopens a delivered task for a change-request round, notifies the assigned
 // editor with the change notes, and tells the owners. The editor can reply to
 // the change-request message with the updated file + "done" to resubmit.
-async function requestChanges(task, notes, source) {
+//
+// The original deadline governs ONLY the first delivery. Once work has been
+// submitted, a stale (already-passed) deadline must not keep marking the
+// revision as overdue — that's what made every revision instantly late. So we
+// drop the first-round deadline here and re-arm the past-deadline nudge flag,
+// unless the owner supplies a fresh, optional review deadline for this round.
+async function requestChanges(task, notes, source, reviewDeadline = null) {
   const nextRevision = (task.revision_count || 0) + 1;
   const title = fmt.taskTitle(task);
   const editorName = task.editors?.name || 'Unassigned';
 
   // Reopen so the task re-enters active lists, reminders, etc. (always works).
-  await db.updateTaskStatus(task.id, 'in_progress', { completed_at: null });
+  await db.updateTaskStatus(task.id, 'in_progress', {
+    completed_at: null,
+    deadline: reviewDeadline || null,
+    deadline_notified_at: null,
+  });
+
+  // Stamp the round just delivered (review_log) with this change request BEFORE
+  // bumping the revision count, so the history closes out the right round.
+  try {
+    await db.stampReviewRoundChangeRequest(task.id, notes);
+  } catch (err) {
+    console.warn('[Changes] Could not stamp review round in history:', err.message);
+  }
 
   // Record the revision round (best-effort — columns may be new).
   try {
@@ -116,6 +142,10 @@ async function requestChanges(task, notes, source) {
     console.warn('[Changes] Could not store revision metadata:', err.message);
   }
 
+  const deadlineLine = reviewDeadline
+    ? `📅 *Revision deadline:* ${fmt.fmtDeadline(reviewDeadline)}\n`
+    : `📅 _No deadline set for this revision._\n`;
+
   // Notify the editor and point the task's reply-target at this new message, so
   // replying to it with the updated file resolves the right task.
   if (task.editors?.telegram_id) {
@@ -123,8 +153,9 @@ async function requestChanges(task, notes, source) {
       task.editors.telegram_id,
       `🔁 *Changes Requested* (Revision #${nextRevision})\n\n` +
       `Task: *${title}*\n` +
-      `Type: ${fmt.fmtType(task.type)}\n\n` +
-      `📝 *What to change:*\n_${notes}_\n\n` +
+      `Type: ${fmt.fmtType(task.type)}\n` +
+      deadlineLine +
+      `\n📝 *What to change:*\n_${notes}_\n\n` +
       `👇 Tap *Done* below (or reply here) with the updated file when it's ready.`,
       kb.editorTaskButtons(task.id)
     );
@@ -143,6 +174,7 @@ async function requestChanges(task, notes, source) {
     `Task: *${title}*\n` +
     `Employee: *${editorName}*\n` +
     `Revision: #${nextRevision}\n` +
+    `Deadline: ${reviewDeadline ? fmt.fmtDeadline(reviewDeadline) : 'None (optional for revisions)'}\n` +
     `Notes: _${notes}_` +
     (source ? `\n_(via ${source})_` : '')
   );
@@ -153,18 +185,28 @@ async function requestChanges(task, notes, source) {
 // the DB status constraint hasn't been migrated yet (see schema.sql), so the
 // "done" flow never hard-fails. Returns true when it truly entered review.
 async function submitForReview(task) {
+  let entered = true;
   try {
     await db.updateTaskStatus(task.id, 'submitted_for_review');
-    return true;
   } catch (err) {
     console.warn('[Review] Could not set submitted_for_review — run the status migration in schema.sql. Falling back to in_progress:', err.message);
+    entered = false;
     try {
       await db.updateTaskStatus(task.id, 'in_progress');
     } catch (e2) {
       console.warn('[Review] Fallback status update also failed:', e2.message);
     }
-    return false;
   }
+
+  // Log this delivery for the work-record history regardless of which status the
+  // task landed in — the employee delivered either way (best-effort, new cols).
+  try {
+    await db.recordSubmission(task.id);
+  } catch (err) {
+    console.warn('[Review] Could not record submission in history:', err.message);
+  }
+
+  return entered;
 }
 
 // Alerts the owners that an employee has submitted work for review, with Approve /

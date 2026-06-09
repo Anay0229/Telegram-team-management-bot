@@ -351,18 +351,20 @@ function parseOwnerMark(body) {
 }
 
 // ── Change requests ──────────────────────────────────────────────────────────
-// Format: changes [work or client] | [what to change]
+// Format: changes [work or client] | [what to change] | [optional review deadline]
+// The 3rd segment is optional — revisions have no deadline unless one is given.
 function parseChangesCommand(body) {
   const rest = body.replace(/^(changes?|revisions?|revise|redo)\b\s*:?\s*/i, '').trim();
-  const idx = rest.indexOf('|');
-  if (idx === -1) return null;
-  const project = rest.slice(0, idx).trim();
-  const notes = rest.slice(idx + 1).trim();
+  const parts = rest.split('|');
+  if (parts.length < 2) return null;
+  const project = parts[0].trim();
+  const notes = parts[1].trim();
+  const deadlineStr = parts.length >= 3 ? parts.slice(2).join('|').trim() : '';
   if (!project || !notes) return null;
-  return { project, notes };
+  return { project, notes, deadlineStr: deadlineStr || null };
 }
 
-async function handleOwnerChanges(from, { project, notes }) {
+async function handleOwnerChanges(from, { project, notes, deadlineStr }) {
   const matches = await db.findTasksByProjectNameAnyStatus(project);
 
   if (!matches.length) {
@@ -381,7 +383,16 @@ async function handleOwnerChanges(from, { project, notes }) {
     return;
   }
 
-  await requestChanges(matches[0], notes, 'Telegram');
+  // Optional review deadline for this revision round — only set if it parses.
+  let reviewDeadline = null;
+  if (deadlineStr) {
+    reviewDeadline = parseDeadline(deadlineStr);
+    if (!reviewDeadline) {
+      await sendMessage(from, `⚠️ I couldn't read the review deadline "${deadlineStr}", so I'm sending the changes without one.`);
+    }
+  }
+
+  await requestChanges(matches[0], notes, 'Telegram', reviewDeadline);
 }
 
 async function handleOwnerMark(from, { project, status, reason }) {
