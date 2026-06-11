@@ -49,6 +49,16 @@ async function handleEditorMessage(editor, body, quotedMsgId) {
     return;
   }
 
+  // ── availability (self-service on-leave) ────────────────────────────────────
+  if (['unavailable', 'leave', 'on leave', 'off'].includes(text)) {
+    await setSelfAvailability(editor, false);
+    return;
+  }
+  if (['available', 'back', 'im back', "i'm back"].includes(text)) {
+    await setSelfAvailability(editor, true);
+    return;
+  }
+
   // ── status updates ────────────────────────────────────────────────────────
   // Supports: "started", "done", "blocked [reason]" — optionally with a task
   // number ("done 2") or by quote-replying the original assignment message.
@@ -97,7 +107,27 @@ function parseStatusCommand(body) {
 function isKnownEditorCommand(body) {
   const t = body.trim().toLowerCase();
   if (['help', 'my tasks', 'send raw folder', 'send final folder'].includes(t)) return true;
+  if (['unavailable', 'leave', 'on leave', 'off', 'available', 'back', 'im back', "i'm back"].includes(t)) return true;
   return parseStatusCommand(body) != null;
+}
+
+// Editor toggles their own availability. On-leave editors keep their current
+// tasks but are skipped by the load balancer for NEW work. Owners are notified.
+async function setSelfAvailability(editor, available) {
+  try {
+    await db.setEditorAvailable(editor.id, available);
+  } catch (err) {
+    console.warn('[Editor] availability update failed:', err.message);
+    await sendMessage(editor.telegram_id, `⚠️ Couldn't update your availability right now. Please tell management.`);
+    return;
+  }
+  await sendMessage(
+    editor.telegram_id,
+    available
+      ? `✅ You're marked *available* — new work can come your way again.`
+      : `🌴 You're marked *on leave*. You won't get new assignments until you send *available*. Your current tasks stay with you.`
+  );
+  await sendToOwners(`🌴 *${editor.name}* marked themselves *${available ? 'available' : 'on leave'}*.`);
 }
 
 // Records the reason an editor gave after tapping the Blocked button and relays

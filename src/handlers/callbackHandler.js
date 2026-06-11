@@ -118,12 +118,15 @@ async function handleOwnerReviewAction({ query, from, chatId, messageId }, actio
 
   if (action === kb.ACTIONS.CHANGES) {
     // Capture the owner's next message as the change notes (see ownerHandler).
-    pendingChangeNotes.set(from, { taskId: task.id, title: fmt.taskTitle(task) });
+    // `attachments` collects any reference files the owner sends before the notes.
+    const title = fmt.taskTitle(task);
+    pendingChangeNotes.set(from, { taskId: task.id, title, attachments: [] });
     await answerCallback(query.id, '🔁 Send the change notes');
     await sendMessage(
       chatId,
-      `🔁 *Request Changes — ${fmt.taskTitle(task)}*\n\n` +
-      `Reply with *what needs to change* and I'll send it to ${task.editors?.name || 'the employee'}.`
+      `🔁 *Request Changes — ${title}*\n\n` +
+      `Reply with *what needs to change* and I'll send it to ${task.editors?.name || 'the employee'}.\n\n` +
+      `📎 _Optional:_ send reference *files, videos, or a folder link* first — they'll go along with your notes.`
     );
     return;
   }
@@ -147,6 +150,7 @@ async function handlePickEditor({ query, from, chatId, messageId }, editorId) {
     editor: chosen.editor,
     deadline: pending.deadline,
     note: pending.note,
+    priority: pending.priority,
     source: 'Telegram (button)',
     clientId: pending.clientId,
   });

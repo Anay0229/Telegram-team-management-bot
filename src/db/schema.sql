@@ -22,7 +22,8 @@ create table if not exists editors (
   name        text not null,
   telegram_id text not null unique,  -- Telegram chat ID (numeric, stored as text)
   role        text[] not null default '{}',  -- array: ['editor','shoot','graphic_designer','data_sorting']
-  active      boolean not null default true,
+  active      boolean not null default true,  -- team membership (false = removed)
+  available   boolean not null default true,  -- on-leave flag; false = skipped by the load balancer
   created_at  timestamptz not null default now()
 );
 
@@ -36,6 +37,8 @@ create table if not exists tasks (
   assigned_to   uuid not null references editors(id) on delete restrict,
   status        text not null default 'pending'
                   check (status in ('pending', 'in_progress', 'blocked', 'submitted_for_review', 'completed')),
+  priority      text not null default 'normal'
+                  check (priority in ('low', 'normal', 'high', 'urgent')),
   deadline      timestamptz,
   drive_link    text,
   blocked_reason text,
@@ -54,6 +57,8 @@ create table if not exists tasks (
   review_log jsonb not null default '[]'::jsonb, -- one entry per delivery round (see shape below)
   started_at    timestamptz,             -- set on first transition to in_progress
   deadline_notified_at timestamptz,      -- last past-deadline nudge timestamp
+  reminders_sent jsonb not null default '[]'::jsonb, -- hour-thresholds already pre-warned for the current deadline, e.g. [24, 2]
+  escalated_at  timestamptz,             -- set once the owners have been escalated; cleared when the deadline changes
   created_at    timestamptz not null default now(),
   completed_at  timestamptz
 );
@@ -117,6 +122,20 @@ create index if not exists tasks_client_id_idx   on tasks(client_id);
 -- Until this runs, the bot degrades gracefully: work the employee marks "done"
 -- stays 'in_progress' (instead of 'submitted_for_review') but owners still get
 -- the Approve / Request Changes prompt.
+
+-- ── Migration: workflow features (pre-deadline reminders, escalation, priority, leave) ──
+-- If you already created the tables before these features, run:
+--
+--   alter table tasks   add column if not exists reminders_sent jsonb not null default '[]'::jsonb;
+--   alter table tasks   add column if not exists escalated_at timestamptz;
+--   alter table tasks   add column if not exists priority text not null default 'normal'
+--     check (priority in ('low', 'normal', 'high', 'urgent'));
+--   alter table editors add column if not exists available boolean not null default true;
+--
+-- Until this runs, the bot degrades gracefully: pre-deadline reminders and the
+-- persistent-escalation flag are best-effort (skipped with a console warning),
+-- priority falls back to 'normal' on display, and every editor is treated as
+-- available by the load balancer.
 
 -- ── Seed example clients ──────────────────────────────────────────────────────
 

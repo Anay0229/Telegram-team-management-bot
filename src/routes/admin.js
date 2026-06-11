@@ -77,6 +77,13 @@ function typeBadge(type) {
   return `<span class="badge ${cls[type] || 'type-edit'}">${esc(fmt.fmtType(type))}</span>`;
 }
 
+// Small inline badge for non-normal priorities ('normal'/unset render nothing).
+function priorityBadge(priority) {
+  const map = { urgent: '🔴 Urgent', high: '🟠 High', low: '⚪ Low' };
+  if (!map[priority]) return '';
+  return `<span class="badge prio-${priority}">${map[priority]}</span>`;
+}
+
 function roleBadges(roles) {
   const arr = Array.isArray(roles) ? roles : (roles ? [roles] : []);
   if (!arr.length) return '<span class="badge no-dl">—</span>';
@@ -163,6 +170,7 @@ function taskRow(task, selectable = false) {
     <td>
       ${clientName ? `<div class="client-tag">${esc(clientName)}</div>` : ''}
       <a class="row-link" href="/admin/tasks/${task.id}"><strong>${esc(task.project_name)}</strong></a>
+      ${priorityBadge(task.priority)}
       ${task.note ? `<div class="note">📝 ${esc(task.note)}</div>` : ''}
     </td>
     <td>${esc(employee)}</td>
@@ -596,6 +604,15 @@ router.get('/assign', async (req, res) => {
             Type of Work
             <select name="type" required>${typeOpts}</select>
           </label>
+          <label>
+            Priority
+            <select name="priority">
+              <option value="normal" selected>Normal</option>
+              <option value="low">Low</option>
+              <option value="high">High</option>
+              <option value="urgent">Urgent</option>
+            </select>
+          </label>
           <label class="full">
             Main Work / Subtask Description
             <input type="text" name="projectName" placeholder="e.g. Brand Reel Colour Grade" required>
@@ -623,7 +640,7 @@ router.get('/assign', async (req, res) => {
 });
 
 router.post('/assign', async (req, res) => {
-  const { projectName, type, editorId, deadline, note, clientId } = req.body;
+  const { projectName, type, editorId, deadline, note, clientId, priority } = req.body;
   try {
     if (!projectName || !projectName.trim()) throw new Error('Work description is required.');
     if (!TYPES.find((t) => t.value === type)) throw new Error('Invalid work type.');
@@ -636,6 +653,7 @@ router.post('/assign', async (req, res) => {
       editor,
       deadline: parseDeadline(deadline),
       note: note && note.trim() ? note.trim() : null,
+      priority: ['low', 'normal', 'high', 'urgent'].includes(priority) ? priority : 'normal',
       source: 'Admin Portal',
       clientId: clientId || null,
     });
@@ -885,13 +903,17 @@ router.get('/employees', async (req, res) => {
         <td class="mono">${esc(e.telegram_id)}</td>
         <td>${roleBadges(e.role)}</td>
         <td><span class="badge ${e.active ? 'active' : 'inactive'}">${e.active ? 'Active' : 'Inactive'}</span></td>
+        <td><span class="badge ${e.available === false ? 'inactive' : 'active'}">${e.available === false ? '🌴 On leave' : 'Available'}</span></td>
         <td>
+          <form class="inline-form" method="POST" action="/admin/employees/${e.id}/availability">
+            <button class="ghost" type="submit">${e.available === false ? 'Mark Available' : 'Mark On-Leave'}</button>
+          </form>
           <form class="inline-form" method="POST" action="/admin/employees/${e.id}/toggle">
             <button class="${e.active ? 'danger' : 'ghost'}" type="submit">${e.active ? 'Deactivate' : 'Activate'}</button>
           </form>
         </td>
       </tr>`).join('')
-    : `<tr><td colspan="5" class="empty">No employees yet.</td></tr>`;
+    : `<tr><td colspan="6" class="empty">No employees yet.</td></tr>`;
 
   const roleChecks = ROLES.map((r) =>
     `<label class="checkbox-item"><input type="checkbox" name="roles" value="${r.value}"> ${r.label}</label>`
@@ -924,7 +946,7 @@ router.get('/employees', async (req, res) => {
     <div class="card">
       <h2>All Employees</h2>
       <table>
-        <thead><tr><th>Name</th><th>Telegram ID</th><th>Roles</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Telegram ID</th><th>Roles</th><th>Status</th><th>Availability</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
@@ -958,6 +980,18 @@ router.post('/employees/:id/toggle', async (req, res) => {
   }
 });
 
+router.post('/employees/:id/availability', async (req, res) => {
+  try {
+    const editor = await db.getEditorById(req.params.id);
+    if (!editor) throw new Error('Employee not found.');
+    const nowAvailable = editor.available === false; // toggling
+    await db.setEditorAvailable(editor.id, nowAvailable);
+    res.redirect('/admin/employees?ok=' + encodeURIComponent(`${editor.name} is now ${nowAvailable ? 'Available' : 'On leave'}.`));
+  } catch (e) {
+    res.redirect('/admin/employees?error=' + encodeURIComponent(e.message));
+  }
+});
+
 // Keep old /editors URL alive with a redirect so any saved bookmarks work
 router.get('/editors', (req, res) => res.redirect(301, '/admin/employees'));
 
@@ -970,7 +1004,9 @@ router.get('/performance', async (req, res) => {
     const totalCompleted = stats.reduce((s, e) => s + e.completed, 0);
     const totalOnTime    = stats.reduce((s, e) => s + e.onTime, 0);
     const totalWithDl    = stats.reduce((s, e) => s + e.onTime + e.lateCount, 0);
+    const totalFirstPass = stats.reduce((s, e) => s + e.firstPass, 0);
     const overallRate    = totalWithDl > 0 ? Math.round((totalOnTime / totalWithDl) * 100) : null;
+    const overallFirstPass = totalCompleted > 0 ? Math.round((totalFirstPass / totalCompleted) * 100) : null;
     const activeEmployees = stats.filter((e) => e.editor.active).length;
 
     const summaryStats = `
@@ -979,6 +1015,7 @@ router.get('/performance', async (req, res) => {
         <div class="stat"><div class="num">${totalAssigned}</div><div class="lbl">Total Assigned</div></div>
         <div class="stat good"><div class="num">${totalCompleted}</div><div class="lbl">Total Completed</div></div>
         <div class="stat good"><div class="num">${overallRate != null ? overallRate + '%' : '—'}</div><div class="lbl">Overall On-Time Rate</div></div>
+        <div class="stat good"><div class="num">${overallFirstPass != null ? overallFirstPass + '%' : '—'}</div><div class="lbl">First-Pass Approval</div></div>
       </div>`;
 
     const rows = stats.length
@@ -993,18 +1030,20 @@ router.get('/performance', async (req, res) => {
             <td style="text-align:center">${s.active}</td>
             <td style="text-align:center">${s.overdue > 0 ? `<span class="rate-bad">${s.overdue}</span>` : '0'}</td>
             <td style="text-align:center">${onTimeRateCell(s.onTimeRate)}</td>
+            <td style="text-align:center">${onTimeRateCell(s.firstPassRate)}</td>
             <td style="text-align:center">${esc(fmtTurnaround(s.avgTurnaround))}</td>
             <td style="font-size:0.8rem;color:var(--muted-fg)">${fmtDateTime(s.lastStartedAt)}</td>
           </tr>`;
         }).join('')
-      : `<tr><td colspan="10" class="empty">No employees yet. <a href="/admin/employees">Add one →</a></td></tr>`;
+      : `<tr><td colspan="11" class="empty">No employees yet. <a href="/admin/employees">Add one →</a></td></tr>`;
 
     const body = `
       ${summaryStats}
       <div class="card">
-        <h2>Employee Performance</h2>
+        <h2>Employee Performance <a class="button ghost" style="float:right;font-size:0.8rem" href="/admin/performance.csv">⬇ Download CSV</a></h2>
         <p style="font-size:0.8rem;color:var(--muted-fg);margin-bottom:16px">
           <strong>On-Time Rate</strong> = completed before deadline ÷ total completed with a deadline.
+          <strong>First-Pass</strong> = completed with no change-request rounds ÷ total completed.
           <strong>Avg Turnaround</strong> = started → completed (tasks with both timestamps).
         </p>
         <table>
@@ -1016,6 +1055,7 @@ router.get('/performance', async (req, res) => {
               <th style="text-align:center">Active</th>
               <th style="text-align:center">Overdue</th>
               <th style="text-align:center">On-Time Rate</th>
+              <th style="text-align:center">First-Pass</th>
               <th style="text-align:center">Avg Turnaround</th>
               <th>Last Started</th>
             </tr>
@@ -1027,6 +1067,42 @@ router.get('/performance', async (req, res) => {
     res.send(page('Performance', 'performance', body, flashFrom(req.query)));
   } catch (e) {
     res.send(page('Performance', 'performance', '', `<div class="flash err">Could not load performance stats: ${esc(e.message)}</div>`));
+  }
+});
+
+// CSV export of the same performance sheet, for spreadsheets / reporting.
+router.get('/performance.csv', async (req, res) => {
+  try {
+    const stats = await db.getEmployeeStats();
+    const cell = (v) => {
+      const s = v == null ? '' : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = ['Name', 'Roles', 'Status', 'Availability', 'Assigned', 'Completed', 'Active', 'Overdue', 'On-Time %', 'First-Pass %', 'Avg Turnaround (hrs)', 'Last Started'];
+    const lines = [header.join(',')];
+    for (const s of stats) {
+      const e = s.editor;
+      const roles = Array.isArray(e.role) ? e.role.join(' ') : (e.role || '');
+      lines.push([
+        e.name,
+        roles,
+        e.active ? 'Active' : 'Inactive',
+        e.available === false ? 'On leave' : 'Available',
+        s.total,
+        s.completed,
+        s.active,
+        s.overdue,
+        s.onTimeRate == null ? '' : s.onTimeRate,
+        s.firstPassRate == null ? '' : s.firstPassRate,
+        s.avgTurnaround == null ? '' : s.avgTurnaround.toFixed(1),
+        s.lastStartedAt ? new Date(s.lastStartedAt).toISOString() : '',
+      ].map(cell).join(','));
+    }
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="framex-performance-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.send(lines.join('\r\n'));
+  } catch (e) {
+    res.status(500).send('Could not generate CSV: ' + e.message);
   }
 });
 

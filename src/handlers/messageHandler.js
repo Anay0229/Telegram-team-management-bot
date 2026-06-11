@@ -1,7 +1,7 @@
 const config = require('../config');
 const db = require('../db/supabase');
 const { sendMessage } = require('../services/telegram');
-const { handleOwnerMessage } = require('./ownerHandler');
+const { handleOwnerMessage, handleOwnerFile } = require('./ownerHandler');
 const { handleEditorMessage, handleEditorFile } = require('./editorHandler');
 
 /**
@@ -38,8 +38,12 @@ async function handleIncomingMessage(from, body, quotedMsgId) {
  * file is { fileId, fileType, fileName, caption } extracted from the Telegram message.
  */
 async function handleIncomingFile(from, file, quotedMsgId) {
-  // Owners uploading files don't need their own files forwarded back to them.
-  if (config.isOwner(from)) return;
+  // Owners' files only matter while assembling a change request (reference
+  // attachments after tapping 🔁 Request Changes); otherwise they're ignored.
+  if (config.isOwner(from)) {
+    await handleOwnerFile(from, file);
+    return;
+  }
 
   const editor = await db.getEditorByTelegramId(from);
   if (editor) {

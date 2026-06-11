@@ -1,7 +1,7 @@
 // Shared assignment logic used by BOTH the Telegram owner flow and the admin portal.
 
 const db = require('../db/supabase');
-const { sendMessage, sendToOwners } = require('./telegram');
+const { sendMessage, sendToOwners, sendFile } = require('./telegram');
 const fmt = require('./formatters');
 const kb = require('./keyboards');
 const config = require('../config');
@@ -26,7 +26,7 @@ function driveLink() {
   return config.drive.rawFiles;
 }
 
-async function assignProject({ projectName, type, editor, deadline, note, source, clientId }) {
+async function assignProject({ projectName, type, editor, deadline, note, source, clientId, priority }) {
   const client = clientId ? await db.getClientById(clientId) : null;
   const clientName = client?.name || null;
   const link = driveLink();
@@ -39,6 +39,7 @@ async function assignProject({ projectName, type, editor, deadline, note, source
     driveLink: link,
     note,
     clientId: clientId || null,
+    priority: priority || 'normal',
   });
 
   // Preserve the original deadline for the work-record history (best-effort —
@@ -51,7 +52,7 @@ async function assignProject({ projectName, type, editor, deadline, note, source
 
   const sent = await sendMessage(
     editor.telegram_id,
-    fmt.assignmentNotification(clientName, projectName, type, deadline, link, note),
+    fmt.assignmentNotification(clientName, projectName, type, deadline, link, note, task.priority || priority),
     kb.editorTaskButtons(task.id)
   );
   const msgId = sent?.message_id?.toString() || null;
@@ -69,6 +70,7 @@ async function assignProject({ projectName, type, editor, deadline, note, source
     `Work: *${projectName}*\n` +
     `Employee: *${editor.name}*\n` +
     `Type: ${fmt.fmtType(type)}\n` +
+    (fmt.fmtPriority(task.priority || priority) ? `Priority: ${fmt.fmtPriority(task.priority || priority)}\n` : '') +
     `Deadline: ${fmt.fmtDeadline(deadline)}\n` +
     (note ? `Note: _${note}_\n` : '') +
     `Drive link sent to employee.` +
@@ -115,7 +117,10 @@ async function changeTaskStatus(task, status, reason) {
 // revision as overdue — that's what made every revision instantly late. So we
 // drop the first-round deadline here and re-arm the past-deadline nudge flag,
 // unless the owner supplies a fresh, optional review deadline for this round.
-async function requestChanges(task, notes, source, reviewDeadline = null) {
+// `attachments` (optional) is an array of { fileId, fileType, fileName } the owner
+// chose to send along with the revision — reference material the editor should see.
+// They're forwarded to the editor right after the change-request message.
+async function requestChanges(task, notes, source, reviewDeadline = null, attachments = []) {
   const nextRevision = (task.revision_count || 0) + 1;
   const title = fmt.taskTitle(task);
   const editorName = task.editors?.name || 'Unassigned';
@@ -126,6 +131,10 @@ async function requestChanges(task, notes, source, reviewDeadline = null) {
     deadline: reviewDeadline || null,
     deadline_notified_at: null,
   });
+
+  // Re-arm the pre-deadline reminder + escalation flags for the new revision
+  // deadline (best-effort — new columns; no-ops on an un-migrated schema).
+  await db.rearmDeadlineFlags(task.id);
 
   // Stamp the round just delivered (review_log) with this change request BEFORE
   // bumping the revision count, so the history closes out the right round.
@@ -146,6 +155,11 @@ async function requestChanges(task, notes, source, reviewDeadline = null) {
     ? `📅 *Revision deadline:* ${fmt.fmtDeadline(reviewDeadline)}\n`
     : `📅 _No deadline set for this revision._\n`;
 
+  const attachCount = Array.isArray(attachments) ? attachments.length : 0;
+  const attachmentLine = attachCount
+    ? `\n📎 *${attachCount} reference ${attachCount === 1 ? 'file' : 'files'} attached below.*\n`
+    : '';
+
   // Notify the editor and point the task's reply-target at this new message, so
   // replying to it with the updated file resolves the right task.
   if (task.editors?.telegram_id) {
@@ -155,8 +169,9 @@ async function requestChanges(task, notes, source, reviewDeadline = null) {
       `Task: *${title}*\n` +
       `Type: ${fmt.fmtType(task.type)}\n` +
       deadlineLine +
-      `\n📝 *What to change:*\n_${notes}_\n\n` +
-      `👇 Tap *Done* below (or reply here) with the updated file when it's ready.`,
+      `\n📝 *What to change:*\n_${notes}_\n` +
+      attachmentLine +
+      `\n👇 Tap *Done* below (or reply here) with the updated file when it's ready.`,
       kb.editorTaskButtons(task.id)
     );
     const msgId = sent?.message_id?.toString();
@@ -165,6 +180,20 @@ async function requestChanges(task, notes, source, reviewDeadline = null) {
         await db.updateTaskAssignmentMsgId(task.id, msgId);
       } catch (err) {
         console.warn('[Changes] Could not update reply-target message id:', err.message);
+      }
+    }
+
+    // Forward the owner's reference attachments right after the notes (best-effort,
+    // one at a time — a failed file shouldn't drop the rest or the whole request).
+    for (const att of attachments || []) {
+      try {
+        await sendFile(task.editors.telegram_id, {
+          fileId: att.fileId,
+          fileType: att.fileType,
+          caption: `📎 Reference for the requested changes — *${title}*`,
+        });
+      } catch (err) {
+        console.warn('[Changes] Could not forward change attachment:', err.message);
       }
     }
   }
@@ -176,6 +205,7 @@ async function requestChanges(task, notes, source, reviewDeadline = null) {
     `Revision: #${nextRevision}\n` +
     `Deadline: ${reviewDeadline ? fmt.fmtDeadline(reviewDeadline) : 'None (optional for revisions)'}\n` +
     `Notes: _${notes}_` +
+    (attachCount ? `\nAttachments: ${attachCount} file${attachCount === 1 ? '' : 's'} forwarded` : '') +
     (source ? `\n_(via ${source})_` : '')
   );
 }
@@ -255,7 +285,7 @@ async function notifyEditorOfAssignment(task, editor) {
   const link = task.drive_link || driveLink();
   const sent = await sendMessage(
     editor.telegram_id,
-    fmt.assignmentNotification(clientName, task.project_name, task.type, task.deadline, link, task.note),
+    fmt.assignmentNotification(clientName, task.project_name, task.type, task.deadline, link, task.note, task.priority),
     kb.editorTaskButtons(task.id)
   );
   const msgId = sent?.message_id?.toString();
@@ -314,21 +344,76 @@ async function bulkSetDeadline(tasks, deadline, source) {
   return count;
 }
 
+// Moves a single task to a new editor: updates the DB, tells the previous editor
+// it left their plate, and sends the new editor the assignment notification.
+// Returns false (no-op) when the task is already theirs. Does NOT message owners —
+// callers decide whether to send a single-task or a bulk summary.
+async function reassignTaskCore(task, newEditor) {
+  if (task.assigned_to === newEditor.id) return false; // already theirs
+  const oldEditor = task.editors;
+  await db.setTaskAssignee(task.id, newEditor.id);
+  if (oldEditor?.telegram_id) {
+    await sendMessage(
+      oldEditor.telegram_id,
+      `ℹ️ Your task *${fmt.taskTitle(task)}* has been reassigned by management.`
+    );
+  }
+  await notifyEditorOfAssignment(task, newEditor);
+  return true;
+}
+
+// Single-task reassign with its own owner summary — used by the Telegram
+// "reassign … to …" command. Returns true when the move actually happened.
+async function reassignTask(task, newEditor, source) {
+  const moved = await reassignTaskCore(task, newEditor);
+  if (moved) {
+    await sendToOwners(
+      `🔄 *Task Reassigned*\n\n` +
+      `Task: *${fmt.taskTitle(task)}*\n` +
+      `Now with: *${newEditor.name}*` +
+      (source ? `\n_(via ${source})_` : '')
+    );
+  }
+  return moved;
+}
+
+// Re-pings the assigned editor about a task (a manual reminder), and points the
+// task's reply-target at this fresh message so a quick reply still resolves it.
+async function nudgeTask(task, source) {
+  const editor = task.editors;
+  if (!editor?.telegram_id) return false;
+  const title = fmt.taskTitle(task);
+  const sent = await sendMessage(
+    editor.telegram_id,
+    `🔔 *Reminder from management*\n\n` +
+    `Task: *${title}*\n` +
+    `Type: ${fmt.fmtType(task.type)}\n` +
+    `Deadline: ${fmt.fmtDeadline(task.deadline)}\n` +
+    `Status: ${fmt.fmtStatus(task.status)}\n\n` +
+    `👇 Tap a button to update it, or reply with *started* / *done* / *blocked [reason]*.`,
+    kb.editorTaskButtons(task.id)
+  );
+  const msgId = sent?.message_id?.toString();
+  if (msgId) {
+    try {
+      await db.updateTaskAssignmentMsgId(task.id, msgId);
+    } catch (err) {
+      console.warn('[Nudge] Could not update reply-target message id:', err.message);
+    }
+  }
+  await sendToOwners(
+    `🔔 *Nudge Sent*\n\n` +
+    `Task: *${title}*\n` +
+    `Employee: *${editor.name}*` +
+    (source ? `\n_(via ${source})_` : '')
+  );
+  return true;
+}
+
 async function bulkReassign(tasks, newEditor, source) {
   let count = 0;
   for (const task of tasks) {
-    const oldEditor = task.editors;
-    if (task.assigned_to === newEditor.id) continue; // already theirs
-    await db.setTaskAssignee(task.id, newEditor.id);
-    count++;
-    // Let the previous owner know it left their plate.
-    if (oldEditor?.telegram_id) {
-      await sendMessage(
-        oldEditor.telegram_id,
-        `ℹ️ Your task *${fmt.taskTitle(task)}* has been reassigned by management.`
-      );
-    }
-    await notifyEditorOfAssignment(task, newEditor);
+    if (await reassignTaskCore(task, newEditor)) count++;
   }
   if (count) {
     await sendToOwners(
@@ -344,6 +429,8 @@ module.exports = {
   assignProject,
   changeTaskStatus,
   requestChanges,
+  reassignTask,
+  nudgeTask,
   submitForReview,
   notifyOwnersOfSubmission,
   approveTask,

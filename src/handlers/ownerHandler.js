@@ -3,8 +3,8 @@ const { sendMessage } = require('../services/telegram');
 const lb = require('../services/loadBalancer');
 const fmt = require('../services/formatters');
 const kb = require('../services/keyboards');
-const { parseDeadline, assignProject, changeTaskStatus, requestChanges } = require('../services/assignments');
-const { sendDeadlineReminders, sendEscalationAlerts } = require('../jobs/scheduler');
+const { parseDeadline, assignProject, changeTaskStatus, requestChanges, reassignTask, nudgeTask } = require('../services/assignments');
+const { sendDeadlineReminders, sendPreDeadlineReminders, sendEscalationAlerts } = require('../jobs/scheduler');
 
 // Pending assignment confirmations + button-driven change-note prompts live in a
 // shared module so the inline-button callback handler can read/write them too.
@@ -31,7 +31,7 @@ function resolveType(raw) {
 function isKnownOwnerCommand(body) {
   const t = body.trim().toLowerCase();
   if (['clients', 'team status', 'overdue', 'completed today', 'test reminders', 'run reminders', 'help'].includes(t)) return true;
-  if (/^(new project\s*:|mark\s+|changes?\b|revisions?\b|revise\b|redo\b|assign to\s+)/i.test(t)) return true;
+  if (/^(new project\s*:|mark\s+|changes?\b|revisions?\b|revise\b|redo\b|assign to\s+|reassign\s+|nudge\s+|remind\s+|leave\s+|back\s+)/i.test(t)) return true;
   if (/\bstatus$/i.test(t)) return true; // "[employee name] status"
   return false;
 }
@@ -46,11 +46,11 @@ async function handleOwnerMessage(from, body, quotedMsgId) {
     if (isKnownOwnerCommand(body)) {
       pendingChangeNotes.delete(from);
     } else {
-      const { taskId } = pendingChangeNotes.get(from);
+      const { taskId, attachments } = pendingChangeNotes.get(from);
       pendingChangeNotes.delete(from);
       const task = await db.getTaskById(taskId);
       if (task) {
-        await requestChanges(task, body.trim(), 'Telegram (button)');
+        await requestChanges(task, body.trim(), 'Telegram (button)', null, attachments || []);
       } else {
         await sendMessage(from, `❌ I couldn't find that task anymore.`);
       }
@@ -126,6 +126,24 @@ async function handleOwnerMessage(from, body, quotedMsgId) {
     return;
   }
 
+  // ── reassign [project/client] to [name] ───────────────────────────────────────
+  if (/^reassign\b/i.test(text)) {
+    await handleOwnerReassign(from, body);
+    return;
+  }
+
+  // ── nudge / remind [project or employee] ──────────────────────────────────────
+  if (/^(nudge|remind)\b/i.test(text)) {
+    await handleOwnerNudge(from, body);
+    return;
+  }
+
+  // ── leave / back [employee] (mark on-leave / available) ───────────────────────
+  if (/^(leave|back)\b/i.test(text)) {
+    await handleOwnerAvailability(from, body);
+    return;
+  }
+
   // ── assign to [name] ──────────────────────────────────────────────────────────
   if (text.startsWith('assign to ')) {
     const editorName = body.slice(10).trim();
@@ -176,18 +194,20 @@ async function handleOwnerMessage(from, body, quotedMsgId) {
   // ── test reminders (run the deadline checks on demand) ──────────────────────────
   if (text === 'test reminders' || text === 'run reminders') {
     await sendMessage(from, `⏳ Running deadline checks now…`);
-    const [rem, esc] = await Promise.all([
+    const [pre, rem, esc] = await Promise.all([
+      sendPreDeadlineReminders(),
       sendDeadlineReminders(),
       sendEscalationAlerts(),
     ]);
-    const err = rem.error || esc.error;
+    const err = pre.error || rem.error || esc.error;
     await sendMessage(
       from,
       `✅ *Reminder check complete*\n\n` +
+      `⏳ Pre-deadline heads-ups: *${pre.sent || 0}* sent\n` +
       `⏰ Deadline reminders: *${rem.sent || 0}* sent (${rem.due || 0} at/past deadline)\n` +
       `🚨 Escalations: *${esc.sent || 0}* sent\n\n` +
       (err ? `⚠️ Some checks errored: _${err}_\n\n` : ``) +
-      `_Reminders fire automatically the minute a deadline is reached._`
+      `_Reminders fire automatically before and when a deadline is reached._`
     );
     return;
   }
@@ -202,6 +222,46 @@ async function handleOwnerMessage(from, body, quotedMsgId) {
   await sendMessage(from, `❓ I didn't understand that. Type *help* to see available commands.`);
 }
 
+// ── Owner file uploads ─────────────────────────────────────────────────────────
+// The only time an owner's uploaded file is meaningful is while they're putting
+// together a change request (after tapping 🔁 Request Changes). We queue the file
+// as a reference attachment. A file sent WITHOUT a caption waits for more files /
+// the notes; a file WITH a caption uses that caption as the notes and sends the
+// whole request right away. Any other owner file is ignored (returns false).
+async function handleOwnerFile(from, file) {
+  if (!pendingChangeNotes.has(from)) return false;
+
+  const pending = pendingChangeNotes.get(from);
+  pending.attachments.push({
+    fileId: file.fileId,
+    fileType: file.fileType,
+    fileName: file.fileName || null,
+  });
+
+  const caption = (file.caption || '').trim();
+  const forWhom = pending.title ? `the employee for *${pending.title}*` : 'the employee';
+
+  // Caption present → it doubles as the change notes; finalise immediately.
+  if (caption) {
+    pendingChangeNotes.delete(from);
+    const task = await db.getTaskById(pending.taskId);
+    if (task) {
+      await requestChanges(task, caption, 'Telegram (button)', null, pending.attachments);
+    } else {
+      await sendMessage(from, `❌ I couldn't find that task anymore.`);
+    }
+    return true;
+  }
+
+  // No caption → keep collecting; the owner's next text message is the notes.
+  const n = pending.attachments.length;
+  await sendMessage(
+    from,
+    `📎 Attached *${n}* file${n === 1 ? '' : 's'}. Send more if you like, then *type your change notes* and I'll deliver everything to ${forWhom}.`
+  );
+  return true;
+}
+
 // ── New project parsing ────────────────────────────────────────────────────────
 // Format: new project: [client] | [main work] | [type] | deadline: [date] | note: [text]
 // Client can be a name (partial match against the DB) or omitted with "-".
@@ -213,9 +273,10 @@ async function handleNewProject(from, body) {
     await sendMessage(
       from,
       `❌ *Invalid format.*\n\n` +
-      `new project: [client] | [main work] | [type] | deadline: [date] | note: [optional]\n\n` +
-      `Types: *edit · shoot · graphic designing · data sorting*\n\n` +
-      `Example:\nnew project: Acme Brand | Brand Reel | edit | deadline: 10 Jun\n\n` +
+      `new project: [client] | [main work] | [type] | deadline: [date] | priority: [optional] | note: [optional]\n\n` +
+      `Types: *edit · shoot · graphic designing · data sorting*\n` +
+      `Priority: *low · normal · high · urgent* (defaults to normal)\n\n` +
+      `Example:\nnew project: Acme Brand | Brand Reel | edit | deadline: 10 Jun | priority: high\n\n` +
       `Type *clients* to see the list of available clients.`
     );
     return;
@@ -246,6 +307,14 @@ async function handleNewProject(from, body) {
   const notePart = parts.find((p) => /^note\s*:/i.test(p));
   if (notePart) note = notePart.replace(/^note\s*:/i, '').trim() || null;
 
+  // Optional priority (low | normal | high | urgent) — defaults to normal.
+  let priority = 'normal';
+  const priorityPart = parts.find((p) => /^priority\s*:/i.test(p));
+  if (priorityPart) {
+    const raw = priorityPart.replace(/^priority\s*:/i, '').trim().toLowerCase();
+    if (['low', 'normal', 'high', 'urgent'].includes(raw)) priority = raw;
+  }
+
   // Resolve client by name
   let client = null;
   if (clientQuery && clientQuery !== '-') {
@@ -275,10 +344,10 @@ async function handleNewProject(from, body) {
   }
 
   const clientName = client?.name || null;
-  pendingAssignments.set(from, { projectName, type, deadline, note, ranked, clientId: client?.id || null, clientName });
+  pendingAssignments.set(from, { projectName, type, deadline, note, priority, ranked, clientId: client?.id || null, clientName });
   await sendMessage(
     from,
-    fmt.assignmentConfirmationPrompt(clientName, projectName, type, deadline, ranked, note),
+    fmt.assignmentConfirmationPrompt(clientName, projectName, type, deadline, ranked, note, priority),
     kb.assignmentButtons(ranked)
   );
 }
@@ -286,7 +355,7 @@ async function handleNewProject(from, body) {
 // ── Assignment confirmation ────────────────────────────────────────────────────
 async function tryResolveConfirmation(from, body) {
   const text = body.trim().toLowerCase();
-  const { projectName, type, deadline, note, ranked, clientId, clientName } = pendingAssignments.get(from);
+  const { projectName, type, deadline, note, priority, ranked, clientId, clientName } = pendingAssignments.get(from);
 
   let chosenScored = null;
 
@@ -304,7 +373,7 @@ async function tryResolveConfirmation(from, body) {
 
   if (!chosenScored) return false;
 
-  await assignProject({ projectName, type, editor: chosenScored.editor, deadline, note, source: 'Telegram', clientId });
+  await assignProject({ projectName, type, editor: chosenScored.editor, deadline, note, priority, source: 'Telegram', clientId });
   pendingAssignments.delete(from);
   return true;
 }
@@ -314,7 +383,7 @@ async function handleDirectAssign(from, editorName) {
     await sendMessage(from, `❌ No pending assignment. Use *new project:* first.`);
     return;
   }
-  const { projectName, type, deadline, note, ranked, clientId } = pendingAssignments.get(from);
+  const { projectName, type, deadline, note, priority, ranked, clientId } = pendingAssignments.get(from);
   const chosenScored = ranked.find((s) =>
     s.editor.name.toLowerCase().includes(editorName.toLowerCase())
   );
@@ -322,7 +391,7 @@ async function handleDirectAssign(from, editorName) {
     await sendMessage(from, `❌ Employee "${editorName}" not found. Reply with the number (1, 2…) or their exact name.`);
     return;
   }
-  await assignProject({ projectName, type, editor: chosenScored.editor, deadline, note, source: 'Telegram', clientId });
+  await assignProject({ projectName, type, editor: chosenScored.editor, deadline, note, priority, source: 'Telegram', clientId });
   pendingAssignments.delete(from);
 }
 
@@ -416,4 +485,118 @@ async function handleOwnerMark(from, { project, status, reason }) {
   await changeTaskStatus(matches[0], status, reason);
 }
 
-module.exports = { handleOwnerMessage };
+// ── Reassign ───────────────────────────────────────────────────────────────────
+// Format: reassign [work or client] to [employee name]
+async function handleOwnerReassign(from, body) {
+  const rest = body.replace(/^reassign\b\s*:?\s*/i, '').trim();
+  const m = rest.match(/^(.*\S)\s+to\s+(.+)$/i);
+  if (!m) {
+    await sendMessage(
+      from,
+      `❌ *Invalid format.*\n\nUse:\nreassign [work or client] to [employee]\n\nExample:\nreassign Brand Reel to Priya`
+    );
+    return;
+  }
+  const project = m[1].trim();
+  const editorName = m[2].trim();
+
+  const matches = await db.findActiveTasksByProjectName(project);
+  if (!matches.length) {
+    await sendMessage(from, `❌ No active task matching "${project}".`);
+    return;
+  }
+  if (matches.length > 1) {
+    const list = matches
+      .map((t, i) => `${i + 1}. *${fmt.taskTitle(t)}* — ${t.editors?.name || 'Unassigned'} (${fmt.fmtStatus(t.status)})`)
+      .join('\n');
+    await sendMessage(from, `⚠️ Multiple tasks match "${project}":\n\n${list}\n\nPlease use the full work description.`);
+    return;
+  }
+
+  const editor = await db.getEditorByName(editorName);
+  if (!editor) {
+    await sendMessage(from, `❌ No employee found matching "${editorName}".`);
+    return;
+  }
+
+  const moved = await reassignTask(matches[0], editor, 'Telegram');
+  if (!moved) {
+    await sendMessage(from, `ℹ️ *${fmt.taskTitle(matches[0])}* is already assigned to *${editor.name}*.`);
+  }
+}
+
+// ── Availability (on-leave) ─────────────────────────────────────────────────────
+// Format: leave [employee]  → on leave (skipped when assigning)
+//         back  [employee]  → available again
+async function handleOwnerAvailability(from, body) {
+  const m = body.match(/^(leave|back)\b\s*:?\s*(.+)$/i);
+  if (!m || !m[2].trim()) {
+    await sendMessage(from, `❌ Use: *leave [employee]* to put someone on leave, or *back [employee]* when they return.`);
+    return;
+  }
+  const available = m[1].toLowerCase() === 'back';
+  const name = m[2].trim();
+  const editor = await db.getEditorByName(name);
+  if (!editor) {
+    await sendMessage(from, `❌ No employee found matching "${name}".`);
+    return;
+  }
+  try {
+    await db.setEditorAvailable(editor.id, available);
+  } catch (err) {
+    await sendMessage(from, `⚠️ Couldn't update availability — the *available* column may need the database migration.\n_${err.message}_`);
+    return;
+  }
+  await sendMessage(
+    from,
+    available
+      ? `✅ *${editor.name}* is back and available for new work.`
+      : `🌴 *${editor.name}* is now *on leave* — they'll be skipped when assigning new work. Existing tasks stay with them.`
+  );
+}
+
+// ── Nudge ──────────────────────────────────────────────────────────────────────
+// Format: nudge [work or client]  — or —  nudge [employee name]
+// Tries a task match first, then falls back to nudging all of an employee's work.
+async function handleOwnerNudge(from, body) {
+  const target = body.replace(/^(nudge|remind)\b\s*:?\s*/i, '').trim();
+  if (!target) {
+    await sendMessage(from, `❌ Use: nudge [work or client] — or — nudge [employee name].`);
+    return;
+  }
+
+  const matches = await db.findActiveTasksByProjectName(target);
+  if (matches.length === 1) {
+    const ok = await nudgeTask(matches[0], 'Telegram');
+    if (!ok) await sendMessage(from, `⚠️ *${fmt.taskTitle(matches[0])}* has no reachable employee to nudge.`);
+    return;
+  }
+  if (matches.length > 1) {
+    const list = matches
+      .map((t, i) => `${i + 1}. *${fmt.taskTitle(t)}* — ${t.editors?.name || 'Unassigned'} (${fmt.fmtStatus(t.status)})`)
+      .join('\n');
+    await sendMessage(from, `⚠️ Multiple tasks match "${target}":\n\n${list}\n\nPlease use the full work description, or nudge the employee by name.`);
+    return;
+  }
+
+  // No task matched — treat the target as an employee and nudge all their work.
+  const editor = await db.getEditorByName(target);
+  if (!editor) {
+    await sendMessage(from, `❌ No task or employee matching "${target}".`);
+    return;
+  }
+  const tasks = await db.getTasksForEditorWithJoin(editor.id);
+  if (!tasks.length) {
+    await sendMessage(from, `✅ *${editor.name}* has no active tasks to nudge.`);
+    return;
+  }
+  let nudged = 0;
+  for (const t of tasks) {
+    // getTasksForEditorWithJoin doesn't join editors; attach so nudgeTask can reach them.
+    t.editors = { name: editor.name, telegram_id: editor.telegram_id };
+    if (await nudgeTask(t, 'Telegram')) nudged++;
+  }
+  await sendMessage(from, `🔔 Sent ${nudged} reminder${nudged === 1 ? '' : 's'} to *${editor.name}*.`);
+}
+
+module.exports = { handleOwnerMessage, handleOwnerFile };

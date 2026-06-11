@@ -30,6 +30,12 @@ config.loadScore = {
   urgentWindowHours: 48,
 };
 
+// Pre-deadline reminders: warn the assigned editor this many hours BEFORE a
+// deadline (in addition to the at-deadline reminder). Each threshold fires once.
+config.reminders = {
+  preDeadlineHours: [24, 2],
+};
+
 // True if the given Telegram chat ID belongs to an owner.
 config.isOwner = (chatId) => config.owners.includes(String(chatId));
 

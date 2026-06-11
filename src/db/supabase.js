@@ -112,6 +112,19 @@ async function setEditorActive(id, active) {
   return data;
 }
 
+// Marks an editor available / on-leave. Unavailable editors are skipped by the
+// load balancer when ranking candidates for new work.
+async function setEditorAvailable(id, available) {
+  const { data, error } = await supabase
+    .from('editors')
+    .update({ available })
+    .eq('id', id)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
 async function getEditorByTelegramId(telegramId) {
   const { data, error } = await supabase
     .from('editors')
@@ -134,21 +147,27 @@ async function getEditorByName(name) {
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
 
-async function createTask({ projectName, type, assignedTo, deadline, driveLink, note, clientId }) {
-  const { data, error } = await supabase
+async function createTask({ projectName, type, assignedTo, deadline, driveLink, note, clientId, priority }) {
+  const base = {
+    project_name: projectName,
+    client_id: clientId || null,
+    type,
+    assigned_to: assignedTo,
+    status: 'pending',
+    deadline,
+    drive_link: driveLink,
+    note: note || null,
+  };
+  let { data, error } = await supabase
     .from('tasks')
-    .insert({
-      project_name: projectName,
-      client_id: clientId || null,
-      type,
-      assigned_to: assignedTo,
-      status: 'pending',
-      deadline,
-      drive_link: driveLink,
-      note: note || null,
-    })
+    .insert({ ...base, priority: priority || 'normal' })
     .select()
     .single();
+  // priority column not migrated yet → retry without it (best-effort).
+  if (error && /priority/i.test(error.message || '')) {
+    console.warn('[DB] createTask: priority column missing, inserting without it (run the migration).');
+    ({ data, error } = await supabase.from('tasks').insert(base).select().single());
+  }
   if (error) throw error;
   return data;
 }
@@ -420,15 +439,29 @@ async function updateTaskStatus(taskId, status, extra = {}) {
 }
 
 // Updates a task's deadline (used by the bulk "set deadline" admin action).
+// Re-arms every deadline signal so the fresh deadline triggers reminders and
+// escalation again instead of being suppressed by the old one's flags.
 async function setTaskDeadline(taskId, deadline) {
   const { data, error } = await supabase
     .from('tasks')
-    .update({ deadline })
+    .update({ deadline, deadline_notified_at: null })
     .eq('id', taskId)
     .select()
     .single();
   if (error) throw error;
+  await rearmDeadlineFlags(taskId); // best-effort (new columns)
   return data;
+}
+
+// Best-effort reset of the new pre-deadline-reminder and escalation flags after a
+// deadline change. Silently no-ops if those columns aren't migrated yet, so the
+// surrounding deadline update never hard-fails on an old schema.
+async function rearmDeadlineFlags(taskId) {
+  const { error } = await supabase
+    .from('tasks')
+    .update({ reminders_sent: [], escalated_at: null })
+    .eq('id', taskId);
+  if (error) console.warn('[DB] rearmDeadlineFlags skipped (run the migration):', error.message);
 }
 
 // Reassigns a task to a different employee (bulk reassign + single reassign).
@@ -525,6 +558,31 @@ async function getTasksStillInProgressAfterDeadline() {
   return data;
 }
 
+// In-progress tasks more than `windowMs` past their deadline that have NOT yet
+// been escalated to the owners. Persists dedup across restarts via escalated_at
+// (vs. the old in-memory Set). Throws if escalated_at isn't migrated yet — the
+// scheduler catches that and falls back to the in-memory approach.
+async function getTasksNeedingEscalation(windowMs) {
+  const cutoff = new Date(Date.now() - windowMs).toISOString();
+  const { data, error } = await supabase
+    .from('tasks')
+    .select('*, editors(name, telegram_id), clients(name)')
+    .eq('status', 'in_progress')
+    .not('deadline', 'is', null)
+    .lt('deadline', cutoff)
+    .is('escalated_at', null);
+  if (error) throw error;
+  return data;
+}
+
+async function markTaskEscalated(taskId) {
+  const { error } = await supabase
+    .from('tasks')
+    .update({ escalated_at: new Date().toISOString() })
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
 async function getAllTasksForEditor(editorId) {
   const { data, error } = await supabase
     .from('tasks')
@@ -567,7 +625,7 @@ async function getCompletedThisMonth() {
 async function getEmployeeStats() {
   const [editors, tasksResult] = await Promise.all([
     getAllEditorsIncludingInactive(),
-    supabase.from('tasks').select('id, assigned_to, status, deadline, started_at, completed_at, created_at'),
+    supabase.from('tasks').select('id, assigned_to, status, deadline, started_at, completed_at, created_at, revision_count'),
   ]);
   if (tasksResult.error) throw tasksResult.error;
   const tasks = tasksResult.data;
@@ -575,7 +633,7 @@ async function getEmployeeStats() {
 
   const map = {};
   for (const e of editors) {
-    map[e.id] = { total: 0, completed: 0, active: 0, overdue: 0, onTime: 0, lateCount: 0, turnaroundHours: [], lastStartedAt: null };
+    map[e.id] = { total: 0, completed: 0, active: 0, overdue: 0, onTime: 0, lateCount: 0, firstPass: 0, turnaroundHours: [], lastStartedAt: null };
   }
 
   for (const t of tasks) {
@@ -584,6 +642,8 @@ async function getEmployeeStats() {
     s.total++;
     if (t.status === 'completed') {
       s.completed++;
+      // Approved on the first submission = no change-request rounds.
+      if (!t.revision_count) s.firstPass++;
       if (t.deadline && t.completed_at) {
         if (new Date(t.completed_at) <= new Date(t.deadline)) s.onTime++;
         else s.lateCount++;
@@ -606,10 +666,11 @@ async function getEmployeeStats() {
     const s = map[e.id];
     const completedWithDeadline = s.onTime + s.lateCount;
     const onTimeRate = completedWithDeadline > 0 ? Math.round((s.onTime / completedWithDeadline) * 100) : null;
+    const firstPassRate = s.completed > 0 ? Math.round((s.firstPass / s.completed) * 100) : null;
     const avgTurnaround = s.turnaroundHours.length > 0
       ? s.turnaroundHours.reduce((a, b) => a + b, 0) / s.turnaroundHours.length
       : null;
-    return { editor: e, ...s, onTimeRate, avgTurnaround };
+    return { editor: e, ...s, onTimeRate, firstPassRate, avgTurnaround };
   });
 }
 
@@ -651,6 +712,16 @@ async function markTaskDeadlineNotified(taskId) {
   if (error) throw error;
 }
 
+// Persists which pre-deadline hour-thresholds have already been sent for a task
+// (e.g. [24, 2]). The scheduler reads tasks.reminders_sent and appends to it.
+async function markReminderSent(taskId, remindersSent) {
+  const { error } = await supabase
+    .from('tasks')
+    .update({ reminders_sent: remindersSent })
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
 // Deletes every task whose project_name starts with the given prefix — used by
 // the admin test endpoints to clean up seeded demo data. Returns the count removed.
 async function deleteTasksByNamePrefix(prefix) {
@@ -675,6 +746,7 @@ module.exports = {
   getAllEditorsIncludingInactive,
   getEditorById,
   setEditorActive,
+  setEditorAvailable,
   getEditorByTelegramId,
   getEditorByName,
   createTask,
@@ -695,6 +767,7 @@ module.exports = {
   getMostRecentActiveTaskForEditor,
   updateTaskStatus,
   setTaskDeadline,
+  rearmDeadlineFlags,
   setTaskAssignee,
   getAllActiveTasks,
   getTasksAwaitingReview,
@@ -704,6 +777,8 @@ module.exports = {
   getTasksDueSoon,
   getTasksAtDeadlineNeedingReminder,
   getTasksStillInProgressAfterDeadline,
+  getTasksNeedingEscalation,
+  markTaskEscalated,
   getAllTasksForEditor,
   getCompletedTasksHistory,
   getCompletedThisWeek,
@@ -711,5 +786,6 @@ module.exports = {
   getEmployeeStats,
   getOverdueTasksNeedingEditorNotification,
   markTaskDeadlineNotified,
+  markReminderSent,
   deleteTasksByNamePrefix,
 };

@@ -55,7 +55,9 @@ function isCompatible(editor, projectType) {
  */
 async function getRankedEditors(projectType) {
   const editors = await db.getAllEditors();
-  const compatible = editors.filter((e) => isCompatible(e, projectType));
+  // Skip on-leave editors. `available` may be undefined on an un-migrated schema —
+  // treat anything that isn't an explicit false as available.
+  const compatible = editors.filter((e) => e.available !== false && isCompatible(e, projectType));
   const scored = await Promise.all(compatible.map(scoreEditor));
 
   scored.sort((a, b) => {

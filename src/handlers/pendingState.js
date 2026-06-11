@@ -15,7 +15,9 @@ module.exports = {
   // An editor who tapped the "Blocked" button and whose next message is the reason.
   pendingBlockReason: new Map(),
 
-  // ownerId -> { taskId, title }
+  // ownerId -> { taskId, title, attachments: [{ fileId, fileType, fileName }] }
   // An owner who tapped "Request Changes" and whose next message is the change notes.
+  // `attachments` collects any optional reference files the owner sends before the
+  // notes; they're forwarded to the editor when the change request is finalised.
   pendingChangeNotes: new Map(),
 };
