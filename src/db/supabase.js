@@ -722,6 +722,19 @@ async function markReminderSent(taskId, remindersSent) {
   if (error) throw error;
 }
 
+// Permanently deletes a single task — used by the admin portal's per-row Delete
+// button to remove wrongly-created tasks. Returns the deleted row (or null).
+async function deleteTaskById(taskId) {
+  const { data, error } = await supabase
+    .from('tasks')
+    .delete()
+    .eq('id', taskId)
+    .select('id, project_name')
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
 // Deletes every task whose project_name starts with the given prefix — used by
 // the admin test endpoints to clean up seeded demo data. Returns the count removed.
 async function deleteTasksByNamePrefix(prefix) {
@@ -787,5 +800,6 @@ module.exports = {
   getOverdueTasksNeedingEditorNotification,
   markTaskDeadlineNotified,
   markReminderSent,
+  deleteTaskById,
   deleteTasksByNamePrefix,
 };

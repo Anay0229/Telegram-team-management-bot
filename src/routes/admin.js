@@ -113,7 +113,7 @@ function page(title, activeNav, body, flash = '') {
   <title>Framex Admin — ${esc(title)}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/admin.css">
 </head>
 <body>
@@ -180,8 +180,19 @@ function taskRow(task, selectable = false) {
       ${isOverdue(task) ? '<div class="overdue-flag">⚠ OVERDUE</div>' : ''}
     </td>
     <td>${statusBadge(task.status)}</td>
-    <td>${statusForm(task)}</td>
+    <td>
+      ${statusForm(task)}
+      ${deleteForm(task.id)}
+    </td>
   </tr>`;
+}
+
+// Per-row delete with a browser confirm — for removing wrongly-created tasks.
+function deleteForm(taskId, label = '🗑 Delete') {
+  return `<form class="inline-form delete-form" method="POST" action="/admin/tasks/${taskId}/delete"
+    onsubmit="return confirm('Delete this task permanently? This cannot be undone.')">
+    <button class="danger" type="submit">${label}</button>
+  </form>`;
 }
 
 // ── Changes / Revisions helpers ─────────────────────────────────────────────────
@@ -420,8 +431,10 @@ router.get('/', async (req, res) => {
         <div class="stat"><div class="num">${editors.length}</div><div class="lbl">Active Employees</div></div>
       </div>`;
 
+    // Note: don't pass taskRow directly to map — its second param (selectable)
+    // would receive the array index, adding stray checkbox cells from row 1 on.
     const activeRows = active.length
-      ? active.map(taskRow).join('')
+      ? active.map((t) => taskRow(t)).join('')
       : `<tr><td colspan="6" class="empty">No active tasks. <a href="/admin/assign">Assign work →</a></td></tr>`;
 
     const historyRows = history.length
@@ -435,9 +448,10 @@ router.get('/', async (req, res) => {
           <td style="font-size:0.8rem">${fmtDateTime(t.started_at)}</td>
           <td style="font-size:0.8rem">${fmtDateTime(t.first_submitted_at || t.deliverable_uploaded_at)}</td>
           <td>${firstSubmissionBadge(t)}</td>
-          <td>${statusBadge(t.status)}<div style="font-size:0.75rem;color:var(--muted-fg);margin-top:6px">${fmtDateTime(t.completed_at)}</div></td>
+          <td>${statusBadge(t.status)}<div style="font-size:0.8rem;color:var(--muted-fg);margin-top:6px">${fmtDateTime(t.completed_at)}</div></td>
+          <td>${deleteForm(t.id)}</td>
         </tr>`).join('')
-      : `<tr><td colspan="7" class="empty">No completed tasks yet.</td></tr>`;
+      : `<tr><td colspan="8" class="empty">No completed tasks yet.</td></tr>`;
 
     const body = `
       ${stats}
@@ -445,7 +459,7 @@ router.get('/', async (req, res) => {
       <div class="card">
         <h2>Active Work</h2>
         <table>
-          <thead><tr><th>Work</th><th>Employee</th><th>Type</th><th>Deadline</th><th>Status</th><th>Change Status</th></tr></thead>
+          <thead><tr><th>Work</th><th>Employee</th><th>Type</th><th>Deadline</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>${activeRows}</tbody>
         </table>
       </div>
@@ -453,7 +467,7 @@ router.get('/', async (req, res) => {
         <h2>Previous Work <a class="section-link" href="/admin/performance">→ Performance</a></h2>
         <p style="font-size:0.85rem;color:var(--muted-fg);margin-bottom:16px">Showing the 1st submission and final outcome. <strong>Click any work</strong> to see its full lifecycle — initial deadline, every review round, and approval.</p>
         <table>
-          <thead><tr><th>Work</th><th>Done By</th><th>Type</th><th>Started</th><th>1st Submitted</th><th>1st Result</th><th>Final</th></tr></thead>
+          <thead><tr><th>Work</th><th>Done By</th><th>Type</th><th>Started</th><th>1st Submitted</th><th>1st Result</th><th>Final</th><th></th></tr></thead>
           <tbody>${historyRows}</tbody>
         </table>
         <p style="font-size:0.78rem;color:var(--muted-fg);margin-top:18px">
@@ -487,8 +501,11 @@ router.get('/tasks/:id', async (req, res) => {
           ${statusBadge(task.status)}
         </div>
         ${task.note ? `<div class="note">📝 ${esc(task.note)}</div>` : ''}
-        <h3 style="margin:28px 0 18px;font-size:1rem;letter-spacing:-0.01em">Lifecycle</h3>
+        <h3 style="margin:28px 0 18px;font-size:1.1rem;letter-spacing:-0.01em">Lifecycle</h3>
         ${renderTaskTimeline(task)}
+        <div style="margin-top:28px;padding-top:20px;border-top:1px solid var(--border)">
+          ${deleteForm(task.id, '🗑 Delete This Task')}
+        </div>
       </div>`;
     res.send(page(title, 'tasks', body, flashFrom(req.query)));
   } catch (e) {
@@ -708,7 +725,7 @@ router.get('/tasks', async (req, res) => {
         <table>
           <thead><tr>
             <th class="check-col"><input type="checkbox" class="check-all" title="Select all"></th>
-            <th>Work</th><th>Employee</th><th>Type</th><th>Deadline</th><th>Status</th><th>Change Status</th>
+            <th>Work</th><th>Employee</th><th>Type</th><th>Deadline</th><th>Status</th><th>Actions</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -810,6 +827,18 @@ router.post('/tasks/:id/status', async (req, res) => {
     if (!task) throw new Error('Task not found.');
     await changeTaskStatus(task, status, status === 'blocked' ? (reason && reason.trim() ? reason.trim() : 'No reason given') : null);
     res.redirect(`${back}?ok=` + encodeURIComponent(`"${task.project_name}" marked ${fmt.fmtStatus(status).replace(/^[^ ]+ /, '')}.`));
+  } catch (e) {
+    res.redirect(`${back}?error=` + encodeURIComponent(e.message));
+  }
+});
+
+// Permanently remove a task (wrong info, duplicates, etc.). Confirmed client-side.
+router.post('/tasks/:id/delete', async (req, res) => {
+  const back = req.headers.referer && req.headers.referer.includes('/tasks') ? '/admin/tasks' : '/admin';
+  try {
+    const deleted = await db.deleteTaskById(req.params.id);
+    if (!deleted) throw new Error('Task not found (already deleted?).');
+    res.redirect(`${back}?ok=` + encodeURIComponent(`Deleted "${deleted.project_name}".`));
   } catch (e) {
     res.redirect(`${back}?error=` + encodeURIComponent(e.message));
   }
