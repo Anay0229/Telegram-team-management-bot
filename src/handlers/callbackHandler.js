@@ -32,6 +32,10 @@ async function handleCallbackQuery(query) {
       return handleOwnerReviewAction(ctx, action, id);
     case kb.ACTIONS.PICK_EDITOR:
       return handlePickEditor(ctx, id);
+    case kb.ACTIONS.NOOP:
+      // Inert status-notice button (e.g. "📤 Submitted — awaiting approval").
+      await answerCallback(query.id, 'Already submitted — waiting for owner approval.');
+      return;
     default:
       await answerCallback(query.id);
   }
@@ -67,7 +71,9 @@ async function handleEditorAction({ query, from, chatId, messageId }, action, ta
     }
     await assignments.submitForReview(task);
     await assignments.notifyOwnersOfSubmission(editor, task);
-    await editMessageReplyMarkup(chatId, messageId, null); // consume the buttons
+    // Replace the action buttons with a visible "submitted" notice rather than
+    // clearing them — so the message stays obviously intact (never looks deleted).
+    await editMessageReplyMarkup(chatId, messageId, kb.statusNoticeButton('📤 Submitted — awaiting approval'));
     await answerCallback(query.id, '📤 Submitted for review');
     await sendMessage(
       chatId,

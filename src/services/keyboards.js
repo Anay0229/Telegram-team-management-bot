@@ -17,6 +17,7 @@ const ACTIONS = {
   APPROVE: 'ap',
   CHANGES: 'ch',
   PICK_EDITOR: 'pa',
+  NOOP: 'no',
 };
 
 // Parses "verb:id" callback data into { action, id }. Returns null when malformed.
@@ -43,6 +44,15 @@ function editorTaskButtons(taskId) {
       ],
     ],
   };
+}
+
+// A single, inert "status notice" button used to REPLACE an editor's action
+// buttons once the task has been submitted. Leaving a visible notice (instead of
+// clearing the keyboard to empty) keeps the original message obviously intact —
+// so consuming the buttons never looks like the message was deleted. Tapping it
+// is a no-op handled by the callback router.
+function statusNoticeButton(label) {
+  return { inline_keyboard: [[{ text: label, callback_data: `${ACTIONS.NOOP}:1` }]] };
 }
 
 // Buttons shown to owners on a submitted deliverable (file or "done" notice).
@@ -73,6 +83,7 @@ module.exports = {
   ACTIONS,
   parseCallbackData,
   editorTaskButtons,
+  statusNoticeButton,
   ownerReviewButtons,
   assignmentButtons,
 };

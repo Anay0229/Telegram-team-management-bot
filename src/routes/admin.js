@@ -173,6 +173,7 @@ function taskRow(task, selectable = false) {
       <a class="row-link" href="/admin/tasks/${task.id}"><strong>${esc(task.project_name)}</strong></a>
       ${priorityBadge(task.priority)}
       ${task.note ? `<div class="note">📝 ${esc(task.note)}</div>` : ''}
+      ${deliverableInline(task)}
     </td>
     <td>${esc(employee)}</td>
     <td>${typeBadge(task.type)}</td>
@@ -215,6 +216,17 @@ function fileRef(task) {
   const name = task.deliverable_file_name || `(${task.deliverable_file_type || 'file'})`;
   return `<div class="mono">📎 ${esc(name)}</div>
     <div class="note">${esc(task.deliverable_file_type || '')}${task.deliverable_uploaded_at ? ' · ' + fmtDateTime(task.deliverable_uploaded_at) : ''}</div>`;
+}
+
+// Compact, inline deliverable indicator shown on a task row / detail header the
+// moment an editor uploads a file — independent of whether they've tapped "done"
+// yet. Keeps the latest submitted file visible everywhere a task is listed, so a
+// delivered file is never hidden away in the Changes tab until it's submitted.
+function deliverableInline(task) {
+  if (!task.deliverable_file_id) return '';
+  const name = task.deliverable_file_name || `(${task.deliverable_file_type || 'file'})`;
+  const when = task.deliverable_uploaded_at ? ' · ' + fmtDateTime(task.deliverable_uploaded_at) : '';
+  return `<div class="note">📎 <span class="mono">${esc(name)}</span>${when}</div>`;
 }
 
 function changeRow(task) {
@@ -443,6 +455,7 @@ router.get('/', async (req, res) => {
           <td>
             ${t.clients?.name ? `<div class="client-tag">${esc(t.clients.name)}</div>` : ''}
             <a class="row-link" href="/admin/tasks/${t.id}"><strong>${esc(t.project_name)}</strong></a>
+            ${deliverableInline(t)}
           </td>
           <td>${esc(t.editors?.name || 'Unknown')}</td>
           <td>${typeBadge(t.type)}</td>
@@ -502,6 +515,11 @@ router.get('/tasks/:id', async (req, res) => {
           ${statusBadge(task.status)}
         </div>
         ${task.note ? `<div class="note">📝 ${esc(task.note)}</div>` : ''}
+        ${task.deliverable_file_id ? `
+        <div class="note" style="margin-top:14px">
+          <strong>Latest delivered file</strong><br>
+          ${fileRef(task)}
+        </div>` : ''}
         <h3 style="margin:28px 0 18px;font-size:1.1rem;letter-spacing:-0.01em">Lifecycle</h3>
         ${renderTaskTimeline(task)}
         <div style="margin-top:28px;padding-top:20px;border-top:1px solid var(--border)">
