@@ -6,6 +6,7 @@ const {
   assignProject, changeTaskStatus, parseDeadline, requestChanges,
   approveTask, bulkComplete, bulkSetDeadline, bulkReassign,
 } = require('../services/assignments');
+const { sendMessage, sendToOwners } = require('../services/telegram');
 
 const router = express.Router();
 
@@ -681,13 +682,73 @@ router.post('/assign', async (req, res) => {
   }
 });
 
+// Sort priority high→low so "urgent first" reads intuitively.
+const PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, low: 3 };
+const ACTIVE_STATUSES = ['pending', 'in_progress', 'blocked', 'submitted_for_review'];
+
+// Builds <option> markup, marking `selected` to match the current query value.
+function optionList(items, selected) {
+  return items.map(({ value, label }) =>
+    `<option value="${esc(value)}" ${String(value) === String(selected || '') ? 'selected' : ''}>${esc(label)}</option>`
+  ).join('');
+}
+
 // ── Tasks list ────────────────────────────────────────────────────────────────────
 router.get('/tasks', async (req, res) => {
   try {
-    const [active, editors] = await Promise.all([db.getAllActiveTasks(), db.getAllEditors()]);
+    const [allActive, editors, clients] = await Promise.all([
+      db.getAllActiveTasks(), db.getAllEditors(), db.getAllActiveClients(),
+    ]);
+
+    // ── Filters (all driven by the GET query so they persist in the URL) ──────────
+    const f = {
+      editorId: req.query.editorId || '',
+      clientId: req.query.clientId || '',
+      priority: req.query.priority || '',
+      status: req.query.status || '',
+      type: req.query.type || '',
+      overdue: req.query.overdue === '1',
+      unassigned: req.query.unassigned === '1',
+      q: (req.query.q || '').trim(),
+      sort: req.query.sort || 'deadline',
+      dir: req.query.dir === 'desc' ? 'desc' : 'asc',
+    };
+    const ql = f.q.toLowerCase();
+
+    let active = allActive.filter((t) => {
+      if (f.unassigned && t.assigned_to) return false;
+      if (f.editorId && t.assigned_to !== f.editorId) return false;
+      if (f.clientId && t.client_id !== f.clientId) return false;
+      if (f.priority && (t.priority || 'normal') !== f.priority) return false;
+      if (f.status && t.status !== f.status) return false;
+      if (f.type && t.type !== f.type) return false;
+      if (f.overdue && !isOverdue(t)) return false;
+      if (ql) {
+        const hay = `${t.project_name || ''} ${t.clients?.name || ''}`.toLowerCase();
+        if (!hay.includes(ql)) return false;
+      }
+      return true;
+    });
+
+    // ── Sort ──────────────────────────────────────────────────────────────────────
+    const cmp = {
+      deadline: (a, b) => {
+        const av = a.deadline ? new Date(a.deadline).getTime() : Infinity;
+        const bv = b.deadline ? new Date(b.deadline).getTime() : Infinity;
+        return av - bv;
+      },
+      priority: (a, b) => (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2),
+      employee: (a, b) => (a.editors?.name || '~').localeCompare(b.editors?.name || '~'),
+      created: (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+    }[f.sort] || null;
+    if (cmp) {
+      active.sort(cmp);
+      if (f.dir === 'desc') active.reverse();
+    }
+
     const rows = active.length
       ? active.map((t) => taskRow(t, true)).join('')
-      : `<tr><td colspan="7" class="empty">No active tasks.</td></tr>`;
+      : `<tr><td colspan="7" class="empty">No tasks match these filters.</td></tr>`;
 
     const roleLabel = { editor: 'Editor', shoot: 'Shoot', graphic_designer: 'Graphic Designer', data_sorting: 'Data Sorting' };
     const editorOpts = editors.length
@@ -696,6 +757,41 @@ router.get('/tasks', async (req, res) => {
           return `<option value="${e.id}">${esc(e.name)}${roleStr ? ` [${esc(roleStr)}]` : ''}</option>`;
         }).join('')
       : `<option value="">No employees</option>`;
+
+    // ── Filter bar (GET form; selections re-applied from the query) ───────────────
+    const filterEditorOpts = `<option value="">All employees</option>` +
+      editors.map((e) => `<option value="${e.id}" ${e.id === f.editorId ? 'selected' : ''}>${esc(e.name)}</option>`).join('');
+    const clientOpts = `<option value="">All clients</option>` +
+      clients.map((c) => `<option value="${c.id}" ${c.id === f.clientId ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+    const priorityOpts = `<option value="">Any priority</option>` +
+      optionList([{ value: 'urgent', label: '🔴 Urgent' }, { value: 'high', label: '🟠 High' }, { value: 'normal', label: 'Normal' }, { value: 'low', label: '⚪ Low' }], f.priority);
+    const statusOpts = `<option value="">Any status</option>` +
+      optionList(ACTIVE_STATUSES.map((s) => ({ value: s, label: fmt.fmtStatus(s).replace(/^[^ ]+ /, '') })), f.status);
+    const typeOpts = `<option value="">Any type</option>` +
+      optionList(TYPES.map((t) => ({ value: t.value, label: t.label })), f.type);
+    const sortOpts = optionList([
+      { value: 'deadline', label: 'Deadline' },
+      { value: 'priority', label: 'Priority' },
+      { value: 'employee', label: 'Employee' },
+      { value: 'created', label: 'Date created' },
+    ], f.sort);
+    const dirOpts = optionList([{ value: 'asc', label: 'Ascending' }, { value: 'desc', label: 'Descending' }], f.dir);
+
+    const filterBar = `
+      <form class="card filter-bar" method="GET" action="/admin/tasks">
+        <div class="bulk-field"><label style="margin:0">Employee</label><select name="editorId">${filterEditorOpts}</select></div>
+        <div class="bulk-field"><label style="margin:0">Client</label><select name="clientId">${clientOpts}</select></div>
+        <div class="bulk-field"><label style="margin:0">Priority</label><select name="priority">${priorityOpts}</select></div>
+        <div class="bulk-field"><label style="margin:0">Status</label><select name="status">${statusOpts}</select></div>
+        <div class="bulk-field"><label style="margin:0">Type</label><select name="type">${typeOpts}</select></div>
+        <div class="bulk-field"><label style="margin:0">Search</label><input type="text" name="q" value="${esc(f.q)}" placeholder="work or client…"></div>
+        <div class="bulk-field"><label style="margin:0">Sort by</label><select name="sort">${sortOpts}</select></div>
+        <div class="bulk-field"><label style="margin:0">Order</label><select name="dir">${dirOpts}</select></div>
+        <label class="check-inline"><input type="checkbox" name="overdue" value="1" ${f.overdue ? 'checked' : ''}> Overdue only</label>
+        <label class="check-inline"><input type="checkbox" name="unassigned" value="1" ${f.unassigned ? 'checked' : ''}> Unassigned only</label>
+        <button type="submit">Apply</button>
+        <a class="ghost-link" href="/admin/tasks">Clear</a>
+      </form>`;
 
     // The bulk form lives outside the table; row checkboxes associate to it via
     // form="bulkForm". Each button overrides the action with formaction so one set
@@ -717,9 +813,14 @@ router.get('/tasks', async (req, res) => {
         <button class="ghost" type="submit" formaction="/admin/tasks/bulk/complete">Mark Complete</button>
       </form>` : '';
 
+    const countLabel = active.length === allActive.length
+      ? `All Active Tasks (${active.length})`
+      : `Tasks (${active.length} of ${allActive.length})`;
+
     const body = `
+      ${filterBar}
       <div class="card">
-        <h2>All Active Tasks (${active.length})</h2>
+        <h2>${countLabel}</h2>
         <p>Tick the tasks you want, then use the bar above to <strong>reassign</strong>, <strong>set a shared deadline</strong>, or <strong>mark them complete</strong> in one go. The per-row dropdown still changes a single task's status.</p>
         ${bulkBar}
         <table>
@@ -833,12 +934,34 @@ router.post('/tasks/:id/status', async (req, res) => {
 });
 
 // Permanently remove a task (wrong info, duplicates, etc.). Confirmed client-side.
+// Fetch the (joined) task first so we can tell the assigned employee it's gone.
 router.post('/tasks/:id/delete', async (req, res) => {
   const back = req.headers.referer && req.headers.referer.includes('/tasks') ? '/admin/tasks' : '/admin';
   try {
+    const task = await db.getTaskById(req.params.id);
     const deleted = await db.deleteTaskById(req.params.id);
     if (!deleted) throw new Error('Task not found (already deleted?).');
-    res.redirect(`${back}?ok=` + encodeURIComponent(`Deleted "${deleted.project_name}".`));
+
+    // Best-effort notifications — never let a Telegram hiccup break the redirect.
+    const title = deleted.project_name;
+    if (task?.editors?.telegram_id) {
+      try {
+        await sendMessage(
+          task.editors.telegram_id,
+          `🗑 The task *"${title}"* was removed by an admin — you don't need to work on it anymore.`
+        );
+      } catch (err) {
+        console.warn('[Admin] Could not notify employee of deletion:', err.message);
+      }
+    }
+    try {
+      const who = task?.editors?.name ? ` (was assigned to *${task.editors.name}*)` : '';
+      await sendToOwners(`🗑 Task *"${title}"*${who} was deleted from the admin portal.`);
+    } catch (err) {
+      console.warn('[Admin] Could not post deletion to owners:', err.message);
+    }
+
+    res.redirect(`${back}?ok=` + encodeURIComponent(`Deleted "${title}".`));
   } catch (e) {
     res.redirect(`${back}?error=` + encodeURIComponent(e.message));
   }

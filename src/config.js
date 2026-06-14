@@ -10,6 +10,10 @@ const ownerIds = (process.env.OWNER_TELEGRAM_IDS || '')
 
 const config = {
   owners: ownerIds, // array of Telegram chat ID strings — every person who can assign/manage work
+  // Optional shared owners group. When set, the bot posts all owner updates to this
+  // single group chat (owners tag the bot to issue commands) instead of DMing each
+  // owner individually. Leave unset to keep the per-owner DM behaviour.
+  groupId: process.env.GROUP_CHAT_ID || null,
   supabase: {
     url: process.env.SUPABASE_URL,
     serviceKey: process.env.SUPABASE_SERVICE_KEY,
@@ -38,5 +42,8 @@ config.reminders = {
 
 // True if the given Telegram chat ID belongs to an owner.
 config.isOwner = (chatId) => config.owners.includes(String(chatId));
+
+// True if the given chat ID is the configured owners group.
+config.isGroup = (chatId) => !!config.groupId && String(chatId) === String(config.groupId);
 
 module.exports = config;

@@ -8,6 +8,14 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
+// The bot's own @username and numeric id, learned from getMe() at startup. Needed
+// in group mode to detect when the bot is tagged / replied to. Set via setBotIdentity.
+let botUsername = null;
+let botId = null;
+function setBotIdentity({ username, id }) { botUsername = username || null; botId = id || null; }
+function getBotUsername() { return botUsername; }
+function getBotId() { return botId; }
+
 // `replyMarkup` (optional) attaches an inline keyboard: { inline_keyboard: [[...]] }.
 async function sendMessage(chatId, text, replyMarkup) {
   const opts = { parse_mode: 'Markdown' };
@@ -27,6 +35,15 @@ async function sendMessage(chatId, text, replyMarkup) {
 }
 
 async function sendToOwners(text, replyMarkup) {
+  // Group mode: one message to the shared group instead of a DM per owner.
+  if (config.groupId) {
+    try {
+      return [await sendMessage(config.groupId, text, replyMarkup)];
+    } catch (err) {
+      console.error(`[Bot] Failed to send to group ${config.groupId}:`, err.message);
+      return [];
+    }
+  }
   const results = [];
   for (const id of config.owners) {
     try {
@@ -141,6 +158,17 @@ async function sendFile(chatId, { fileId, fileType, caption, replyMarkup }) {
 // Returns [{ ownerId, messageId }] so callers can map the forwarded file back to
 // a task (used so owners can reply to the file to request changes).
 async function sendFileToOwners({ fileId, fileType, caption, replyMarkup }) {
+  // Group mode: forward once to the shared group. The group's chat id stands in as
+  // the "ownerId" so reply-to-file change requests resolve against it.
+  if (config.groupId) {
+    try {
+      const sent = await sendFile(config.groupId, { fileId, fileType, caption, replyMarkup });
+      return [{ ownerId: String(config.groupId), messageId: sent?.message_id ?? null }];
+    } catch (err) {
+      console.error(`[Bot] Failed to send file to group ${config.groupId}:`, err.message);
+      return [];
+    }
+  }
   const results = [];
   for (const id of config.owners) {
     try {
@@ -156,4 +184,5 @@ async function sendFileToOwners({ fileId, fileType, caption, replyMarkup }) {
 module.exports = {
   bot, sendMessage, sendToOwner, sendToOwners, extractFile, sendFile, sendFileToOwners,
   answerCallback, editMessageReplyMarkup,
+  setBotIdentity, getBotUsername, getBotId,
 };

@@ -246,6 +246,23 @@ code { font-family: var(--font-mono); font-size: .9em; background: var(--muted);
   text-transform: uppercase; letter-spacing: .08em; margin-right: auto; align-self: center;
 }
 .bulk-count strong { color: var(--accent); }
+
+/* ── Filter bar (Tasks page) ───────────────────────────────────────────── */
+.filter-bar {
+  display: flex; gap: 12px 18px; align-items: flex-end; flex-wrap: wrap;
+  border-left: 3px solid var(--accent);
+}
+.filter-bar .bulk-field { display: flex; flex-direction: column; gap: 6px; }
+.filter-bar .bulk-field label { font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted-fg); }
+.filter-bar select, .filter-bar input[type=text] { height: 42px; width: auto; min-width: 150px; font-size: .92rem; padding: 0 12px; }
+.filter-bar button { height: 42px; }
+.filter-bar .check-inline {
+  display: flex; align-items: center; gap: 8px; font-size: .9rem; align-self: center; white-space: nowrap;
+}
+.filter-bar .check-inline input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); }
+.filter-bar .ghost-link { color: var(--muted-fg); font-size: .9rem; align-self: center; }
+.filter-bar .ghost-link:hover { color: var(--accent); }
+
 .check-col { width: 34px; text-align: center; }
 input[type=checkbox].row-check, input[type=checkbox].check-all {
   width: 18px; height: 18px; border-radius: 0; cursor: pointer; accent-color: var(--accent); vertical-align: middle;

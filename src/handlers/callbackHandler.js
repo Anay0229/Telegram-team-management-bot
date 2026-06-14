@@ -119,8 +119,9 @@ async function handleOwnerReviewAction({ query, from, chatId, messageId }, actio
   if (action === kb.ACTIONS.CHANGES) {
     // Capture the owner's next message as the change notes (see ownerHandler).
     // `attachments` collects any reference files the owner sends before the notes.
+    // Keyed by chatId so the flow works in the shared owners group too.
     const title = fmt.taskTitle(task);
-    pendingChangeNotes.set(from, { taskId: task.id, title, attachments: [] });
+    pendingChangeNotes.set(chatId, { taskId: task.id, title, attachments: [] });
     await answerCallback(query.id, '🔁 Send the change notes');
     await sendMessage(
       chatId,
@@ -136,7 +137,8 @@ async function handleOwnerReviewAction({ query, from, chatId, messageId }, actio
 async function handlePickEditor({ query, from, chatId, messageId }, editorId) {
   if (!config.isOwner(from)) { await answerCallback(query.id, 'Only owners can assign work.', true); return; }
 
-  const pending = pendingAssignments.get(from);
+  // Pending assignments are keyed by chatId (the group, or the owner's DM).
+  const pending = pendingAssignments.get(chatId);
   if (!pending) {
     await answerCallback(query.id, 'This assignment expired — start again with "new project:".', true);
     return;
@@ -154,7 +156,7 @@ async function handlePickEditor({ query, from, chatId, messageId }, editorId) {
     source: 'Telegram (button)',
     clientId: pending.clientId,
   });
-  pendingAssignments.delete(from);
+  pendingAssignments.delete(chatId);
   await editMessageReplyMarkup(chatId, messageId, null);
   await answerCallback(query.id, `Assigned to ${chosen.editor.name}`);
 }

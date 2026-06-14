@@ -7,15 +7,17 @@
 // on restart is harmless: the user simply re-issues the command.
 
 module.exports = {
-  // ownerId -> { projectName, type, deadline, note, ranked, clientId, clientName }
-  // An owner who ran "new project:" and is choosing whom to assign it to.
+  // chatId -> { projectName, type, deadline, note, ranked, clientId, clientName }
+  // An owner who ran "new project:" and is choosing whom to assign it to. Keyed by
+  // chat id so the flow works in the owners group (chatId === ownerId in a DM).
   pendingAssignments: new Map(),
 
   // editorTelegramId -> { taskId, title }
   // An editor who tapped the "Blocked" button and whose next message is the reason.
+  // Editors only ever DM the bot, so this key is the editor's private chat id.
   pendingBlockReason: new Map(),
 
-  // ownerId -> { taskId, title, attachments: [{ fileId, fileType, fileName }] }
+  // chatId -> { taskId, title, attachments: [{ fileId, fileType, fileName }] }
   // An owner who tapped "Request Changes" and whose next message is the change notes.
   // `attachments` collects any optional reference files the owner sends before the
   // notes; they're forwarded to the editor when the change request is finalised.
