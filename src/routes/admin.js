@@ -98,6 +98,7 @@ function page(title, activeNav, body, flash = '') {
     ['/admin',             'Dashboard',  'dashboard'],
     ['/admin/assign',      'Assign Work','assign'],
     ['/admin/tasks',       'Tasks',      'tasks'],
+    ['/admin/kanban',      'Kanban',     'kanban'],
     ['/admin/changes',     'Changes',    'changes'],
     ['/admin/employees',   'Employees',  'employees'],
     ['/admin/performance', 'Performance','performance'],
@@ -196,6 +197,38 @@ function deleteForm(taskId, label = '🗑 Delete') {
     onsubmit="return confirm('Delete this task permanently? This cannot be undone.')">
     <button class="danger" type="submit">${label}</button>
   </form>`;
+}
+
+// ── Kanban ──────────────────────────────────────────────────────────────────────
+// Columns map 1:1 to task statuses so a drag-drop becomes a plain status update via
+// the existing POST /admin/tasks/:id/status endpoint.
+const KANBAN_COLUMNS = [
+  ['pending',              '⏳ Pending'],
+  ['in_progress',          '🔄 In Progress'],
+  ['submitted_for_review', '📤 In Review'],
+  ['blocked',              '🚫 Blocked'],
+  ['completed',            '✅ Completed'],
+];
+
+// How many recently-completed tasks to show in the Kanban "Completed" column.
+const KANBAN_COMPLETED_LIMIT = 20;
+
+function kanbanCard(task) {
+  const client = task.clients?.name;
+  const rev = task.revision_count ? `<span class="badge st-changes">🔁 Rev ${task.revision_count}</span>` : '';
+  return `<div class="kb-card" data-id="${task.id}">
+    <div class="kb-card-head">
+      <code class="task-code">${esc(fmt.taskCode(task))}</code>
+      ${priorityBadge(task.priority)}${rev}
+    </div>
+    ${client ? `<div class="client-tag">${esc(client)}</div>` : ''}
+    <a class="kb-title" href="/admin/tasks/${task.id}"><strong>${esc(task.project_name)}</strong></a>
+    <div class="kb-meta">${typeBadge(task.type)}</div>
+    <div class="kb-foot">
+      <span>${esc(task.editors?.name || 'Unassigned')}</span>
+      <span class="${isOverdue(task) ? 'kb-overdue' : 'kb-due'}">${esc(fmt.fmtDeadline(task.deadline))}</span>
+    </div>
+  </div>`;
 }
 
 // ── Changes / Revisions helpers ─────────────────────────────────────────────────
@@ -713,6 +746,93 @@ function optionList(items, selected) {
 }
 
 // ── Tasks list ────────────────────────────────────────────────────────────────────
+// ── Kanban board ──────────────────────────────────────────────────────────────
+// A visual overview of active work, one column per status. Dragging a card to a
+// new column issues a status update through the existing endpoint (so all the
+// usual notifications fire). Sortable.js is loaded from a CDN; no build step.
+router.get('/kanban', async (req, res) => {
+  try {
+    const [tasks, completed] = await Promise.all([
+      db.getAllActiveTasks(),
+      db.getRecentCompletedTasks(KANBAN_COMPLETED_LIMIT),
+    ]);
+
+    const deadlineCmp = (a, b) => {
+      const av = a.deadline ? new Date(a.deadline).getTime() : Infinity;
+      const bv = b.deadline ? new Date(b.deadline).getTime() : Infinity;
+      return av - bv;
+    };
+
+    const byStatus = {};
+    for (const [key] of KANBAN_COLUMNS) byStatus[key] = [];
+    for (const t of tasks) (byStatus[t.status] || (byStatus[t.status] = [])).push(t);
+    // Completed comes pre-sorted newest-first from the DB; keep that order.
+    byStatus.completed = completed;
+
+    const columnsHtml = KANBAN_COLUMNS.map(([key, label]) => {
+      const list = key === 'completed'
+        ? (byStatus.completed || [])
+        : (byStatus[key] || []).sort(deadlineCmp);
+      const cards = list.length
+        ? list.map(kanbanCard).join('')
+        : '<div class="kb-empty">No tasks</div>';
+      return `<div class="kb-col">
+        <div class="kb-col-head">${label}<span class="kb-count">${list.length}</span></div>
+        <div class="kb-list" data-status="${key}">${cards}</div>
+      </div>`;
+    }).join('');
+
+    const body = `
+      <style>
+        .kb-board { display:flex; gap:14px; align-items:flex-start; overflow-x:auto; padding-bottom:8px; }
+        .kb-col { flex:1 1 0; min-width:240px; background:var(--card,#16181d); border:1px solid var(--border,#272a31); border-radius:12px; }
+        .kb-col-head { display:flex; justify-content:space-between; align-items:center; font-weight:600; padding:12px 14px; border-bottom:1px solid var(--border,#272a31); position:sticky; top:0; }
+        .kb-count { background:var(--border,#272a31); color:var(--muted-fg,#9aa0ab); border-radius:999px; padding:1px 9px; font-size:.75rem; }
+        .kb-list { min-height:80px; padding:10px; display:flex; flex-direction:column; gap:10px; }
+        .kb-card { background:var(--bg,#0f1115); border:1px solid var(--border,#272a31); border-radius:10px; padding:10px 11px; cursor:grab; }
+        .kb-card:active { cursor:grabbing; }
+        .kb-card-head { display:flex; align-items:center; gap:6px; margin-bottom:6px; flex-wrap:wrap; }
+        .kb-title { display:block; margin:4px 0; color:inherit; text-decoration:none; }
+        .kb-title:hover { text-decoration:underline; }
+        .kb-meta { margin:6px 0; }
+        .kb-foot { display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:.78rem; color:var(--muted-fg,#9aa0ab); margin-top:6px; }
+        .kb-overdue { color:#ff6b6b; font-weight:600; }
+        .kb-empty { color:var(--muted-fg,#9aa0ab); font-size:.82rem; text-align:center; padding:14px 0; }
+        .kb-hint { color:var(--muted-fg,#9aa0ab); font-size:.85rem; margin:0 0 14px; }
+        .sortable-ghost { opacity:.4; }
+      </style>
+      <p class="kb-hint">Drag a card to another column to change its status. Click the title to open the task. Dragging into <strong>Blocked</strong> records no reason — add one from the task or Tasks page.</p>
+      <div class="kb-board">${columnsHtml}</div>
+      <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+      <script>
+        document.querySelectorAll('.kb-list').forEach(function (list) {
+          new Sortable(list, {
+            group: 'kanban', animation: 150, ghostClass: 'sortable-ghost',
+            onAdd: function (evt) {
+              var id = evt.item.getAttribute('data-id');
+              var status = evt.to.getAttribute('data-status');
+              fetch('/admin/tasks/' + id + '/status', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'status=' + encodeURIComponent(status)
+              }).then(function (r) {
+                if (!r.ok) throw new Error('update failed');
+                window.location.reload();
+              }).catch(function () {
+                alert('Could not update the task. Reloading.');
+                window.location.reload();
+              });
+            }
+          });
+        });
+      </script>`;
+
+    res.send(page('Kanban', 'kanban', body, flashFrom(req.query)));
+  } catch (e) {
+    res.status(500).send(page('Kanban', 'kanban', `<div class="flash err">${esc(e.message)}</div>`));
+  }
+});
+
 router.get('/tasks', async (req, res) => {
   try {
     const [allActive, editors, clients] = await Promise.all([

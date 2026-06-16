@@ -523,6 +523,19 @@ async function getCompletedToday() {
   return data;
 }
 
+// Most recently completed tasks, newest first — drives the Kanban "Completed"
+// column without letting it grow unbounded.
+async function getRecentCompletedTasks(limit = 20) {
+  const { data, error } = await supabase
+    .from('tasks')
+    .select('*, editors(name, telegram_id), clients(name)')
+    .eq('status', 'completed')
+    .order('completed_at', { ascending: false, nullsFirst: false })
+    .limit(limit);
+  if (error) throw error;
+  return data;
+}
+
 async function getTasksForEditorWithJoin(editorId) {
   const { data, error } = await supabase
     .from('tasks')
@@ -579,6 +592,53 @@ async function markTaskEscalated(taskId) {
   const { error } = await supabase
     .from('tasks')
     .update({ escalated_at: new Date().toISOString() })
+    .eq('id', taskId);
+  if (error) throw error;
+}
+
+// ── Tiered escalation (escalation_log) ──────────────────────────────────────────
+// All in_progress tasks past their deadline, with their escalation_log so the
+// scheduler can decide which tier (if any) is due. Selecting escalation_log
+// explicitly makes this throw on an un-migrated schema, so the scheduler can fall
+// back to the legacy single-shot path.
+async function getInProgressOverdueTasks() {
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from('tasks')
+    .select('id, type, project_name, deadline, escalation_log, editors(name, telegram_id), clients(name)')
+    .eq('status', 'in_progress')
+    .not('deadline', 'is', null)
+    .lt('deadline', now)
+    .order('deadline', { ascending: true });
+  if (error) throw error;
+  return data;
+}
+
+// Appends one entry to a task's escalation_log (read-modify-write). Returns the
+// new log. Throws on an un-migrated schema.
+async function appendEscalationLog(taskId, entry) {
+  const { data: cur, error: e1 } = await supabase
+    .from('tasks').select('escalation_log').eq('id', taskId).single();
+  if (e1) throw e1;
+  const log = Array.isArray(cur?.escalation_log) ? cur.escalation_log : [];
+  log.push(entry);
+  const { error } = await supabase
+    .from('tasks').update({ escalation_log: log }).eq('id', taskId);
+  if (error) throw error;
+  return log;
+}
+
+// Records an owner acknowledgement; once present the scheduler stops escalating.
+async function acknowledgeEscalation(taskId, ownerId) {
+  return appendEscalationLog(taskId, { tier: 'ack', at: new Date().toISOString(), by: String(ownerId) });
+}
+
+// ── Reminder snooze (snoozed_until) ─────────────────────────────────────────────
+// Sets the time until which pre-deadline reminders for this task are suppressed.
+async function setTaskSnoozedUntil(taskId, until) {
+  const { error } = await supabase
+    .from('tasks')
+    .update({ snoozed_until: until })
     .eq('id', taskId);
   if (error) throw error;
 }
@@ -783,6 +843,7 @@ module.exports = {
   rearmDeadlineFlags,
   setTaskAssignee,
   getAllActiveTasks,
+  getRecentCompletedTasks,
   getTasksAwaitingReview,
   getOverdueTasks,
   getCompletedToday,
@@ -792,6 +853,10 @@ module.exports = {
   getTasksStillInProgressAfterDeadline,
   getTasksNeedingEscalation,
   markTaskEscalated,
+  getInProgressOverdueTasks,
+  appendEscalationLog,
+  acknowledgeEscalation,
+  setTaskSnoozedUntil,
   getAllTasksForEditor,
   getCompletedTasksHistory,
   getCompletedThisWeek,

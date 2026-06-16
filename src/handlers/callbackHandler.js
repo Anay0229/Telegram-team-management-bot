@@ -10,6 +10,8 @@ const assignments = require('../services/assignments');
 const {
   answerCallback, editMessageReplyMarkup, sendMessage, sendToOwners,
 } = require('../services/telegram');
+
+const HOUR_MS = 60 * 60 * 1000;
 const { pendingAssignments, pendingBlockReason, pendingChangeNotes } = require('./pendingState');
 
 async function handleCallbackQuery(query) {
@@ -32,6 +34,10 @@ async function handleCallbackQuery(query) {
       return handleOwnerReviewAction(ctx, action, id);
     case kb.ACTIONS.PICK_EDITOR:
       return handlePickEditor(ctx, id);
+    case kb.ACTIONS.SNOOZE:
+      return handleSnooze(ctx, id);
+    case kb.ACTIONS.ACK_ESCALATION:
+      return handleAckEscalation(ctx, id);
     case kb.ACTIONS.NOOP:
       // Inert status-notice button (e.g. "📤 Submitted — awaiting approval").
       await answerCallback(query.id, 'Already submitted — waiting for owner approval.');
@@ -137,6 +143,50 @@ async function handleOwnerReviewAction({ query, from, chatId, messageId }, actio
     );
     return;
   }
+}
+
+// ── Reminder "Got it 👍" button: snooze pre-deadline reminders ───────────────────
+async function handleSnooze({ query, from, chatId, messageId }, taskId) {
+  const editor = await db.getEditorByTelegramId(from);
+  if (!editor) { await answerCallback(query.id, 'You are not registered in the system.', true); return; }
+
+  const task = await db.getTaskById(taskId);
+  if (!task) { await answerCallback(query.id, 'That task no longer exists.', true); return; }
+  if (task.assigned_to !== editor.id) { await answerCallback(query.id, "That task isn't assigned to you.", true); return; }
+
+  const hours = config.reminders?.snoozeHours || 4;
+  const until = new Date(Date.now() + hours * HOUR_MS).toISOString();
+  try {
+    await db.setTaskSnoozedUntil(task.id, until);
+  } catch (err) {
+    // snoozed_until column not migrated yet — acknowledge anyway so the tap isn't a dead end.
+    console.warn('[Snooze] Could not store snooze (run the migration):', err.message);
+  }
+
+  // Replace the button with an inert notice so it can't be tapped twice.
+  await editMessageReplyMarkup(chatId, messageId, kb.statusNoticeButton(`👍 Got it — paused for ${hours}h`));
+  await answerCallback(query.id, `👍 Reminders paused for ${hours}h`);
+
+  if (config.notifications?.notifyOwnerOnAcknowledge) {
+    await sendToOwners(`👍 *${editor.name}* acknowledged \`${fmt.taskCode(task)}\` (${fmt.taskTitle(task)}) — on it.`);
+  }
+}
+
+// ── Escalation "Mark Seen" button: acknowledge so further tiers stop ─────────────
+async function handleAckEscalation({ query, from, chatId, messageId }, taskId) {
+  if (!config.isOwner(from)) { await answerCallback(query.id, 'Only owners can do that.', true); return; }
+
+  const task = await db.getTaskById(taskId);
+  if (!task) { await answerCallback(query.id, 'That task no longer exists.', true); return; }
+
+  try {
+    await db.acknowledgeEscalation(task.id, from);
+  } catch (err) {
+    console.warn('[Escalation] Could not record acknowledgement (run the migration):', err.message);
+  }
+
+  await editMessageReplyMarkup(chatId, messageId, kb.statusNoticeButton('✅ Seen — escalation stopped'));
+  await answerCallback(query.id, '✅ Marked seen — no more alerts for this task');
 }
 
 // ── Assignment confirmation buttons: pick an employee ────────────────────────────

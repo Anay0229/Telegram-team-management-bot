@@ -9,6 +9,8 @@
 //   ap:<taskId>   owner  → Approve a submitted deliverable (→ completed)
 //   ch:<taskId>   owner  → Request Changes (then asks for notes)
 //   pa:<editorId> owner  → confirm assignment to this editor
+//   sn:<taskId>   editor → "Got it 👍" — snooze pre-deadline reminders for this task
+//   ae:<taskId>   owner  → "Mark Seen" — acknowledge an escalation (stops further alerts)
 
 const ACTIONS = {
   STARTED: 'st',
@@ -17,6 +19,8 @@ const ACTIONS = {
   APPROVE: 'ap',
   CHANGES: 'ch',
   PICK_EDITOR: 'pa',
+  SNOOZE: 'sn',
+  ACK_ESCALATION: 'ae',
   NOOP: 'no',
 };
 
@@ -67,6 +71,18 @@ function ownerReviewButtons(taskId) {
   };
 }
 
+// Single "Got it 👍" button shown on a pre-deadline reminder. Tapping it snoozes
+// further pre-deadline reminders for that task (config.reminders.snoozeHours).
+function reminderButtons(taskId) {
+  return { inline_keyboard: [[{ text: '👍 Got it', callback_data: `${ACTIONS.SNOOZE}:${taskId}` }]] };
+}
+
+// Single "Mark Seen" button shown on an escalation alert to the owners. Tapping it
+// acknowledges the escalation so no further tiers fire for that task.
+function escalationButtons(taskId) {
+  return { inline_keyboard: [[{ text: '✅ Mark Seen', callback_data: `${ACTIONS.ACK_ESCALATION}:${taskId}` }]] };
+}
+
 // One button per ranked editor (up to `limit`) for assignment confirmation.
 // `ranked` is the loadBalancer's scored list: [{ editor, score, activeTasks }].
 function assignmentButtons(ranked, limit = 5) {
@@ -85,5 +101,7 @@ module.exports = {
   editorTaskButtons,
   statusNoticeButton,
   ownerReviewButtons,
+  reminderButtons,
+  escalationButtons,
   assignmentButtons,
 };

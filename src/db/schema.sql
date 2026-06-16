@@ -58,7 +58,9 @@ create table if not exists tasks (
   started_at    timestamptz,             -- set on first transition to in_progress
   deadline_notified_at timestamptz,      -- last past-deadline nudge timestamp
   reminders_sent jsonb not null default '[]'::jsonb, -- hour-thresholds already pre-warned for the current deadline, e.g. [24, 2]
-  escalated_at  timestamptz,             -- set once the owners have been escalated; cleared when the deadline changes
+  escalated_at  timestamptz,             -- legacy single-shot escalation flag (superseded by escalation_log; cleared when the deadline changes)
+  escalation_log jsonb not null default '[]'::jsonb, -- tiered escalation history; one entry per tier sent (see shape below)
+  snoozed_until timestamptz,             -- editor tapped "Got it" on a reminder; pre-deadline reminders are suppressed until this time
   created_at    timestamptz not null default now(),
   completed_at  timestamptz
 );
@@ -67,6 +69,11 @@ create table if not exists tasks (
 --     "on_time": true, "changes_requested_at": "<iso|null>", "notes": "<text|null>" }
 -- round = revision_count at submission time (0 = initial delivery, 1+ = revision deliveries).
 -- on_time = submitted_at <= deadline (null when no deadline applied to that round).
+--
+-- escalation_log entry shape (one per escalation tier fired):
+--   { "tier": "2h" | "6h" | "12h" | "daily", "at": "<iso>" }
+-- An acknowledgement is stored as { "tier": "ack", "at": "<iso>", "by": "<ownerId>" };
+-- once present, the scheduler stops escalating that task entirely.
 
 create index if not exists tasks_assigned_to_idx on tasks(assigned_to);
 create index if not exists tasks_status_idx      on tasks(status);
@@ -136,6 +143,16 @@ create index if not exists tasks_client_id_idx   on tasks(client_id);
 -- persistent-escalation flag are best-effort (skipped with a console warning),
 -- priority falls back to 'normal' on display, and every editor is treated as
 -- available by the load balancer.
+
+-- ── Migration: tiered escalation + reminder snooze ─────────────────────────────
+-- If you already created the tasks table before these features, run:
+--
+--   alter table tasks add column if not exists escalation_log jsonb not null default '[]'::jsonb;
+--   alter table tasks add column if not exists snoozed_until  timestamptz;
+--
+-- Until this runs, the bot degrades gracefully: escalation falls back to the old
+-- single-shot behaviour (one alert per overdue task) and the reminder "Got it 👍"
+-- snooze button is a no-op (reminders keep firing on schedule).
 
 -- ── Seed example clients ──────────────────────────────────────────────────────
 

@@ -5,10 +5,3 @@ node_modules/
 .env
 .env.*
 .env.example
-
-# WhatsApp Web session/cache data
-.wwebjs_auth/
-.wwebjs_cache/
-
-# Local confidential docs
-SECURE_HOSTING.md

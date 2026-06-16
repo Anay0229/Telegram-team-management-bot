@@ -55,3 +55,10 @@ alter table tasks add constraint tasks_status_check
 alter table tasks drop constraint if exists tasks_priority_check;
 alter table tasks add constraint tasks_priority_check
   check (priority in ('low', 'normal', 'high', 'urgent'));
+
+-- ── 7. Tiered escalation + reminder snooze ────────────────────────────────────
+-- escalation_log replaces the single-shot escalated_at flag with a per-tier
+-- history (+2h, +6h, +12h, then daily) and supports owner acknowledgement.
+-- snoozed_until lets an editor tap "Got it 👍" to suppress pre-deadline reminders.
+alter table tasks add column if not exists escalation_log jsonb not null default '[]'::jsonb;
+alter table tasks add column if not exists snoozed_until  timestamptz;
