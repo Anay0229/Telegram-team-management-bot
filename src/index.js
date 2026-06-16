@@ -9,6 +9,10 @@ const { handleCallbackQuery } = require('./handlers/callbackHandler');
 const { startScheduler } = require('./jobs/scheduler');
 const { pendingAssignments, pendingChangeNotes } = require('./handlers/pendingState');
 
+// ── Reconnect state (used by polling_error handler and connectBot) ────────────
+let reconnecting = false;
+let schedulerStarted = false;
+
 // ── Group-mode helpers ────────────────────────────────────────────────────────
 // A mid-conversation flow (assignment confirmation / change notes) lets the owner
 // reply in the group without re-tagging the bot. Keyed by chat id (the group).
@@ -42,6 +46,13 @@ function stripMention(text) {
 
 bot.on('polling_error', (err) => {
   console.error('[Bot] Polling error:', err.code, err.message);
+  if (err.code === 'EFATAL') {
+    // Fatal polling error (usually a dropped network connection on a phone server).
+    // Stop the dead poller and reconnect with backoff instead of crashing.
+    bot.stopPolling().catch(() => {}).finally(() => {
+      if (!reconnecting) setTimeout(() => connectBot(), 10000);
+    });
+  }
 });
 
 // Inline-button taps (Started / Done / Blocked / Approve / Request Changes / assign).
@@ -104,19 +115,34 @@ bot.on('message', async (msg) => {
   });
 });
 
-// Connect to Telegram and start the scheduler
-bot.getMe().then((me) => {
-  setBotIdentity({ username: me.username, id: me.id });
-  console.log(`[Bot] ✅ Telegram bot @${me.username} is running!`);
-  if (config.groupId) {
-    console.log(`[Bot] 👥 Group mode ON — owner updates post to group ${config.groupId}. Tag @${me.username} to issue commands.`);
+// Connect to Telegram with exponential backoff so transient network issues on a
+// phone server don't kill the process. Only exits for a bad token (HTTP 401).
+async function connectBot(attempt = 1) {
+  if (reconnecting && attempt === 1) return;
+  reconnecting = true;
+  try {
+    const me = await bot.getMe();
+    setBotIdentity({ username: me.username, id: me.id });
+    console.log(`[Bot] ✅ Telegram bot @${me.username} is running!`);
+    if (config.groupId) {
+      console.log(`[Bot] 👥 Group mode ON — owner updates post to group ${config.groupId}. Tag @${me.username} to issue commands.`);
+    }
+    if (!schedulerStarted) { startScheduler(); schedulerStarted = true; }
+    bot.startPolling();
+    reconnecting = false;
+  } catch (err) {
+    if (err.response?.body?.error_code === 401) {
+      console.error('[Bot] ❌ Invalid TELEGRAM_BOT_TOKEN — check .env and restart.');
+      process.exit(1);
+    }
+    const delay = Math.min(5000 * Math.pow(2, attempt - 1), 60000); // 5s → 10s → 20s → … → 60s
+    console.error(`[Bot] ❌ Cannot reach Telegram (attempt ${attempt}): ${err.message}`);
+    console.log(`[Bot] Retrying in ${Math.round(delay / 1000)}s…`);
+    setTimeout(() => connectBot(attempt + 1), delay);
   }
-  startScheduler();
-}).catch((err) => {
-  console.error('[Bot] ❌ Failed to connect to Telegram:', err.message);
-  console.error('[Bot]    Check that TELEGRAM_BOT_TOKEN in .env is correct.');
-  process.exit(1);
-});
+}
+
+connectBot();
 
 process.on('uncaughtException', (err) => {
   console.error('[Bot] Uncaught exception:', err.message);

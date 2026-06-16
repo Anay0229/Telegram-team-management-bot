@@ -170,6 +170,7 @@ function taskRow(task, selectable = false) {
     ${checkCell}
     <td>
       ${clientName ? `<div class="client-tag">${esc(clientName)}</div>` : ''}
+      <code class="task-code">${esc(fmt.taskCode(task))}</code>
       <a class="row-link" href="/admin/tasks/${task.id}"><strong>${esc(task.project_name)}</strong></a>
       ${priorityBadge(task.priority)}
       ${task.note ? `<div class="note">📝 ${esc(task.note)}</div>` : ''}
@@ -507,7 +508,7 @@ router.get('/tasks/:id', async (req, res) => {
     const body = `
       <p style="margin-bottom:20px"><a class="row-link" href="/admin">← Back to Dashboard</a></p>
       <div class="card">
-        <h2>${esc(task.project_name)}</h2>
+        <h2><code class="task-code">${esc(fmt.taskCode(task))}</code> ${esc(task.project_name)}</h2>
         <div class="task-meta">
           ${clientName ? `<span class="client-tag" style="margin:0">${esc(clientName)}</span>` : ''}
           ${typeBadge(task.type)}

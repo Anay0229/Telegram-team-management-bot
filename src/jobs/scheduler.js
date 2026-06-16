@@ -43,7 +43,7 @@ async function sendEditorDigests() {
     for (const editor of editors) {
       if (!editor.telegram_id) continue;
       const tasks = await db.getTasksForEditorWithJoin(editor.id);
-      const digest = fmt.editorDailyDigest(editor, tasks);
+      const digest = fmt.editorDashboardCard(editor, tasks);
       if (!digest) continue; // no active tasks
       await sendMessage(editor.telegram_id, digest);
       sent++;

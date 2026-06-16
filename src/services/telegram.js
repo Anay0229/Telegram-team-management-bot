@@ -6,7 +6,8 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
   process.exit(1);
 }
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+// polling: false — index.js calls bot.startPolling() after verifying connectivity
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false });
 
 // The bot's own @username and numeric id, learned from getMe() at startup. Needed
 // in group mode to detect when the bot is tagged / replied to. Set via setBotIdentity.

@@ -75,29 +75,44 @@ async function handleEditorMessage(editor, body, quotedMsgId) {
   );
 }
 
-// Parses an editor status command into { status, taskNumber, reason }.
+// Peels a leading task reference — a code ("EDT-A3F2") or a list number ("2") —
+// off the front of a command's argument string. Returns the parsed ref plus the
+// remaining text (used for a block reason). Code is matched first so "blocked
+// EDT-A3F2 waiting on assets" keeps the reason intact.
+function parseLeadingRef(str) {
+  let rest = (str || '').trim();
+  let taskCode = null;
+  let taskNumber = null;
+  let m;
+  if ((m = rest.match(/^([a-z]{2,4}-[a-f0-9]{2,4})\b\s*/i))) {
+    taskCode = m[1].toUpperCase();
+    rest = rest.slice(m[0].length);
+  } else if ((m = rest.match(/^(\d+)\b\s*/))) {
+    taskNumber = parseInt(m[1], 10);
+    rest = rest.slice(m[0].length);
+  }
+  return { taskCode, taskNumber, rest };
+}
+
+// Parses an editor status command into { status, taskNumber, taskCode, reason }.
 // Returns null if the text isn't a status command.
-// Examples: "done", "done 2", "started 1", "blocked", "blocked 2 waiting on assets".
+// Examples: "done", "done 2", "done EDT-A3F2", "blocked EDT-A3F2 waiting on assets".
 function parseStatusCommand(body) {
   const text = body.trim();
   let m;
 
-  if ((m = text.match(/^(done|completed|complete|finished)\b\s*(\d+)?/i))) {
-    return { status: 'completed', taskNumber: m[2] ? parseInt(m[2], 10) : null };
+  if ((m = text.match(/^(done|completed|complete|finished)\b\s*(.*)$/i))) {
+    const ref = parseLeadingRef(m[2]);
+    return { status: 'completed', taskNumber: ref.taskNumber, taskCode: ref.taskCode };
   }
-  if ((m = text.match(/^(started|start|in[\s-]?progress|wip|ongoing)\b\s*(\d+)?/i))) {
-    return { status: 'in_progress', taskNumber: m[2] ? parseInt(m[2], 10) : null };
+  if ((m = text.match(/^(started|start|in[\s-]?progress|wip|ongoing)\b\s*(.*)$/i))) {
+    const ref = parseLeadingRef(m[2]);
+    return { status: 'in_progress', taskNumber: ref.taskNumber, taskCode: ref.taskCode };
   }
   if (/^blocked\b/i.test(text)) {
-    let rest = text.replace(/^blocked\s*/i, '');
-    let taskNumber = null;
-    const numMatch = rest.match(/^(\d+)\s*/);
-    if (numMatch) {
-      taskNumber = parseInt(numMatch[1], 10);
-      rest = rest.slice(numMatch[0].length);
-    }
-    const reason = rest.replace(/^[\s\-–—:]+/, '').trim() || 'No reason given';
-    return { status: 'blocked', taskNumber, reason };
+    const ref = parseLeadingRef(text.replace(/^blocked\s*/i, ''));
+    const reason = ref.rest.replace(/^[\s\-–—:]+/, '').trim() || 'No reason given';
+    return { status: 'blocked', taskNumber: ref.taskNumber, taskCode: ref.taskCode, reason };
   }
   return null;
 }
@@ -147,9 +162,10 @@ async function applyBlockReason(editor, taskId, title, reason) {
 }
 
 // Figures out WHICH task an update applies to.
-// Priority: 1) quoted assignment message  2) explicit task number  3) sole active task.
+// Priority: 1) quoted assignment message  2) task code  3) explicit task number
+//           4) sole active task.
 // Returns { task } on success, or { error, tasks } when it can't decide.
-async function resolveTargetTask(editor, quotedMsgId, taskNumber) {
+async function resolveTargetTask(editor, quotedMsgId, taskNumber, taskCode) {
   // 1) Quote-reply to the original assignment message — most precise.
   if (quotedMsgId) {
     let quotedTask = null;
@@ -170,6 +186,13 @@ async function resolveTargetTask(editor, quotedMsgId, taskNumber) {
   // The numbered list shown to the editor (ordered by deadline) — used for "done 2".
   const tasks = await db.getTasksForEditorWithJoin(editor.id);
 
+  // 2) Task code ("done EDT-A3F2") — unambiguous regardless of list position.
+  if (taskCode) {
+    const hit = fmt.matchTaskByCode(tasks, taskCode);
+    if (hit) return { task: hit };
+    return { error: 'bad_code', tasks, code: taskCode };
+  }
+
   if (taskNumber != null) {
     if (taskNumber >= 1 && taskNumber <= tasks.length) return { task: tasks[taskNumber - 1] };
     return { error: 'bad_number', tasks };
@@ -181,8 +204,8 @@ async function resolveTargetTask(editor, quotedMsgId, taskNumber) {
 }
 
 async function handleStatusUpdate(editor, cmd, quotedMsgId) {
-  const { status, taskNumber, reason } = cmd;
-  const result = await resolveTargetTask(editor, quotedMsgId, taskNumber);
+  const { status, taskNumber, taskCode, reason } = cmd;
+  const result = await resolveTargetTask(editor, quotedMsgId, taskNumber, taskCode);
 
   // ── Could not resolve a single task — guide the editor ────────────────────
   if (result.error) {
@@ -192,18 +215,27 @@ async function handleStatusUpdate(editor, cmd, quotedMsgId) {
       await sendMessage(editor.telegram_id, `❌ That task isn't assigned to you.`);
     } else if (result.error === 'already_done') {
       await sendMessage(editor.telegram_id, `✅ *${result.task.project_name}* is already completed.`);
+    } else if (result.error === 'bad_code') {
+      await sendMessage(
+        editor.telegram_id,
+        `❌ No active task with code *${result.code}*.\n\n${fmt.editorTaskList(result.tasks)}`
+      );
     } else if (result.error === 'bad_number') {
       await sendMessage(
         editor.telegram_id,
         `❌ There's no task #${taskNumber}.\n\n${fmt.editorTaskList(result.tasks)}`
       );
     } else if (result.error === 'ambiguous') {
-      await sendMessage(
-        editor.telegram_id,
-        `🤔 You have *${result.tasks.length}* active tasks, so I'm not sure which one you mean.\n\n` +
-        `${fmt.editorTaskList(result.tasks)}\n\n` +
-        `👉 *Reply to the specific project's message* (swipe/long-press → Reply), or add its number — e.g. *${reason != null ? 'blocked 2 reason' : status === 'completed' ? 'done 2' : 'started 2'}*.`
-      );
+      {
+        const ex = fmt.taskCode(result.tasks[0]);
+        const verb = status === 'blocked' ? `blocked ${ex} reason` : status === 'completed' ? `done ${ex}` : `started ${ex}`;
+        await sendMessage(
+          editor.telegram_id,
+          `🤔 You have *${result.tasks.length}* active tasks, so I'm not sure which one you mean.\n\n` +
+          `${fmt.editorTaskList(result.tasks)}\n\n` +
+          `👉 *Reply to the specific project's message* (swipe/long-press → Reply), or add its code — e.g. *${verb}*.`
+        );
+      }
     }
     return;
   }
@@ -219,6 +251,7 @@ async function handleStatusUpdate(editor, cmd, quotedMsgId) {
     );
     await sendToOwners(
       `🚫 *Task Blocked — Action Required!*\n\n` +
+      `🆔 \`${fmt.taskCode(task)}\`\n` +
       `Employee: *${editor.name}*\n` +
       `Task: *${title}*\n` +
       `Type: ${fmt.fmtType(task.type)}\n` +
@@ -274,11 +307,12 @@ async function handleEditorFile(editor, file, quotedMsgId) {
   const cmd = parseStatusCommand(caption || '');
   const wantsComplete = !!cmd && cmd.status === 'completed';
   const captionTaskNumber = cmd ? cmd.taskNumber : null;
+  const captionTaskCode = cmd ? cmd.taskCode : null;
   // Treat the caption as a free-text note only when it isn't a status command.
   const note = cmd ? null : (caption || '').trim();
 
-  // Link the file to a task: quoted assignment msg → number in caption → sole task.
-  const resolved = await resolveTargetTask(editor, quotedMsgId, captionTaskNumber);
+  // Link the file to a task: quoted assignment msg → code/number in caption → sole task.
+  const resolved = await resolveTargetTask(editor, quotedMsgId, captionTaskNumber, captionTaskCode);
   const task = resolved.task || null;                       // present on success or already_done
   const linkable = !!task && resolved.error !== 'already_done';
   const title = task ? fmt.taskTitle(task) : null;

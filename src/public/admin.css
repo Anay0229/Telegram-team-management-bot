@@ -198,6 +198,7 @@ td strong { font-weight: 700; font-size: 1.05rem; letter-spacing: -0.01em; }
 .empty a { color: var(--accent); }
 mono, .mono { font-family: var(--font-mono); font-size: .9rem; }
 code { font-family: var(--font-mono); font-size: .9em; background: var(--muted); padding: 2px 6px; color: var(--accent); }
+.task-code { display: inline-block; font-size: .72rem; letter-spacing: .04em; font-weight: 700; border-radius: 4px; margin-right: 6px; vertical-align: middle; }
 .rate-good { color: var(--good); font-weight: 700; }
 .rate-warn { color: var(--warn); font-weight: 700; }
 .rate-bad  { color: var(--accent); font-weight: 700; }

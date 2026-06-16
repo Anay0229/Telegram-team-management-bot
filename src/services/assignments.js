@@ -52,7 +52,7 @@ async function assignProject({ projectName, type, editor, deadline, note, source
 
   const sent = await sendMessage(
     editor.telegram_id,
-    fmt.assignmentNotification(clientName, projectName, type, deadline, link, note, task.priority || priority),
+    fmt.assignmentNotification(clientName, projectName, type, deadline, link, note, task.priority || priority, task),
     kb.editorTaskButtons(task.id)
   );
   const msgId = sent?.message_id?.toString() || null;
@@ -66,6 +66,7 @@ async function assignProject({ projectName, type, editor, deadline, note, source
 
   await sendToOwners(
     `✅ *Work Assigned!*\n\n` +
+    `🆔 Task: \`${fmt.taskCode(task)}\`\n` +
     (clientName ? `Client: *${clientName}*\n` : '') +
     `Work: *${projectName}*\n` +
     `Employee: *${editor.name}*\n` +
@@ -166,6 +167,7 @@ async function requestChanges(task, notes, source, reviewDeadline = null, attach
     const sent = await sendMessage(
       task.editors.telegram_id,
       `🔁 *Changes Requested* (Revision #${nextRevision})\n\n` +
+      `🆔 Task: \`${fmt.taskCode(task)}\`\n` +
       `Task: *${title}*\n` +
       `Type: ${fmt.fmtType(task.type)}\n` +
       deadlineLine +
@@ -200,6 +202,7 @@ async function requestChanges(task, notes, source, reviewDeadline = null, attach
 
   await sendToOwners(
     `🔁 *Change Request Sent*\n\n` +
+    `🆔 \`${fmt.taskCode(task)}\`\n` +
     `Task: *${title}*\n` +
     `Employee: *${editorName}*\n` +
     `Revision: #${nextRevision}\n` +
@@ -246,6 +249,7 @@ async function notifyOwnersOfSubmission(editor, task) {
   const title = fmt.taskTitle(task);
   await sendToOwners(
     `📤 *Submitted for Review*\n\n` +
+    `🆔 \`${fmt.taskCode(task)}\`\n` +
     `Employee: *${editor.name}*\n` +
     `Task: *${title}*\n` +
     `Type: ${fmt.fmtType(task.type)}\n` +
@@ -285,7 +289,7 @@ async function notifyEditorOfAssignment(task, editor) {
   const link = task.drive_link || driveLink();
   const sent = await sendMessage(
     editor.telegram_id,
-    fmt.assignmentNotification(clientName, task.project_name, task.type, task.deadline, link, task.note, task.priority),
+    fmt.assignmentNotification(clientName, task.project_name, task.type, task.deadline, link, task.note, task.priority, task),
     kb.editorTaskButtons(task.id)
   );
   const msgId = sent?.message_id?.toString();
@@ -386,6 +390,7 @@ async function nudgeTask(task, source) {
   const sent = await sendMessage(
     editor.telegram_id,
     `🔔 *Reminder from management*\n\n` +
+    `🆔 Task: \`${fmt.taskCode(task)}\`\n` +
     `Task: *${title}*\n` +
     `Type: ${fmt.fmtType(task.type)}\n` +
     `Deadline: ${fmt.fmtDeadline(task.deadline)}\n` +

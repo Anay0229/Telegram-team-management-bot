@@ -26,6 +26,16 @@ function resolveType(raw) {
   return TYPE_ALIASES[raw.toLowerCase().trim()] || null;
 }
 
+// If the owner referenced a task by its short code (e.g. "EDT-A3F2"), resolve it
+// straight to the single active task with that code. Returns the task, or null to
+// let the normal project-name search run. Matches against the active list (which
+// includes submitted-for-review work) — the common target of these commands.
+async function resolveTaskByCode(query) {
+  if (!fmt.looksLikeTaskCode(query)) return null;
+  const active = await db.getAllActiveTasks();
+  return fmt.matchTaskByCode(active, query);
+}
+
 // True when the text is a recognised owner command, so a pending change-note
 // prompt won't swallow it.
 function isKnownOwnerCommand(body) {
@@ -434,7 +444,8 @@ function parseChangesCommand(body) {
 }
 
 async function handleOwnerChanges(from, { project, notes, deadlineStr }) {
-  const matches = await db.findTasksByProjectNameAnyStatus(project);
+  const coded = await resolveTaskByCode(project);
+  const matches = coded ? [coded] : await db.findTasksByProjectNameAnyStatus(project);
 
   if (!matches.length) {
     await sendMessage(from, `❌ No task matching "${project}".`);
@@ -465,6 +476,11 @@ async function handleOwnerChanges(from, { project, notes, deadlineStr }) {
 }
 
 async function handleOwnerMark(from, { project, status, reason }) {
+  const coded = await resolveTaskByCode(project);
+  if (coded) {
+    await changeTaskStatus(coded, status, reason);
+    return;
+  }
   const matches = await db.findActiveTasksByProjectName(project);
 
   if (!matches.length) {
@@ -500,7 +516,8 @@ async function handleOwnerReassign(from, body) {
   const project = m[1].trim();
   const editorName = m[2].trim();
 
-  const matches = await db.findActiveTasksByProjectName(project);
+  const coded = await resolveTaskByCode(project);
+  const matches = coded ? [coded] : await db.findActiveTasksByProjectName(project);
   if (!matches.length) {
     await sendMessage(from, `❌ No active task matching "${project}".`);
     return;
@@ -565,7 +582,8 @@ async function handleOwnerNudge(from, body) {
     return;
   }
 
-  const matches = await db.findActiveTasksByProjectName(target);
+  const coded = await resolveTaskByCode(target);
+  const matches = coded ? [coded] : await db.findActiveTasksByProjectName(target);
   if (matches.length === 1) {
     const ok = await nudgeTask(matches[0], 'Telegram');
     if (!ok) await sendMessage(from, `⚠️ *${fmt.taskTitle(matches[0])}* has no reachable employee to nudge.`);

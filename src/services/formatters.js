@@ -35,6 +35,62 @@ function taskTitle(task) {
   return client ? `${client} — ${task.project_name}` : task.project_name;
 }
 
+// Short type prefix for a task code.
+const TYPE_CODE = {
+  edit: 'EDT',
+  shoot: 'SHT',
+  graphic_designing: 'GFX',
+  data_sorting: 'DAT',
+  // legacy
+  'pre-production': 'EDT',
+  'post-production': 'EDT',
+};
+
+// A stable, human-readable short code for a task (e.g. "EDT-A3F2"), derived from
+// its type + the first hex chars of its UUID id. Needs NO extra DB column, so it
+// works on the existing schema. Gives everyone one unambiguous handle to a task —
+// "done EDT-A3F2" instead of guessing which "video" task was meant.
+function taskCode(task) {
+  if (!task) return '';
+  const prefix = TYPE_CODE[task.type] || 'TSK';
+  const hex = String(task.id || '').replace(/[^a-fA-F0-9]/g, '');
+  const suffix = (hex.slice(0, 4) || '0000').padStart(4, '0').toUpperCase();
+  return `${prefix}-${suffix}`;
+}
+
+// True when a typed token looks like a task code (the dashed "EDT-A3F2" form).
+function looksLikeTaskCode(token) {
+  return typeof token === 'string' && /^[a-z]{2,4}-[a-f0-9]{2,4}$/i.test(token.trim());
+}
+
+// Finds the single task in `tasks` whose code matches `token` (full "EDT-A3F2" or
+// just the "A3F2" suffix). Returns null when nothing — or more than one — matches.
+function matchTaskByCode(tasks, token) {
+  if (!token || !Array.isArray(tasks)) return null;
+  const want = token.trim().toUpperCase();
+  const wantSuffix = want.includes('-') ? want.split('-')[1] : want;
+  const hits = tasks.filter((t) => {
+    const code = taskCode(t).toUpperCase();
+    return code === want || code.split('-')[1] === wantSuffix;
+  });
+  return hits.length === 1 ? hits[0] : null;
+}
+
+// Traffic-light dot + short "time left" text for a deadline. Drives the compact
+// editor card so urgency reads at a glance: 🔴 ≤2h/overdue, 🟡 today, 🟢 later.
+function deadlineSignal(deadline) {
+  if (!deadline) return { dot: '⚪', when: 'no deadline' };
+  const hrs = (new Date(deadline).getTime() - Date.now()) / 3600000;
+  if (hrs < 0) return { dot: '🔴', when: 'overdue' };
+  if (hrs < 1) return { dot: '🔴', when: 'under 1h left' };
+  if (hrs <= 2) return { dot: '🔴', when: `${Math.round(hrs)}h left` };
+  if (hrs <= 24) return { dot: '🟡', when: `${Math.round(hrs)}h left` };
+  return {
+    dot: '🟢',
+    when: new Date(deadline).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }),
+  };
+}
+
 // Short priority badge. 'normal' (and unknown / un-migrated) returns '' so the
 // common case adds no noise; only low/high/urgent show a tag.
 function fmtPriority(priority) {
@@ -48,7 +104,7 @@ function taskLine(task, editorName) {
   const rev = task.revision_count ? ` 🔁 Rev ${task.revision_count}` : '';
   const pr = fmtPriority(task.priority);
   const prTag = pr ? ` ${pr}` : '';
-  return `• *${title}* (${fmtType(task.type)})${prTag}${rev}\n  Status: ${fmtStatus(task.status)}\n  Deadline: ${fmtDeadline(task.deadline)}${name ? `\n  Employee: ${name}` : ''}${task.blocked_reason ? `\n  Reason: ${task.blocked_reason}` : ''}`;
+  return `• \`${taskCode(task)}\` *${title}* (${fmtType(task.type)})${prTag}${rev}\n  Status: ${fmtStatus(task.status)}\n  Deadline: ${fmtDeadline(task.deadline)}${name ? `\n  Employee: ${name}` : ''}${task.blocked_reason ? `\n  Reason: ${task.blocked_reason}` : ''}`;
 }
 
 function editorLoadSummary(scored, index) {
@@ -80,11 +136,13 @@ function assignmentConfirmationPrompt(clientName, projectName, type, deadline, r
   );
 }
 
-function assignmentNotification(clientName, projectName, type, deadline, driveLink, note, priority) {
+function assignmentNotification(clientName, projectName, type, deadline, driveLink, note, priority, task) {
   const title = clientName ? `${clientName} — ${projectName}` : projectName;
   const pr = fmtPriority(priority);
+  const code = task ? taskCode(task) : '';
   return (
     `🎬 *New Work Assigned to You*\n\n` +
+    (code ? `🆔 Task: \`${code}\`\n` : '') +
     (clientName ? `Client: *${clientName}*\n` : '') +
     `Work: *${projectName}*\n` +
     `Type: ${fmtType(type)}\n` +
@@ -93,6 +151,7 @@ function assignmentNotification(clientName, projectName, type, deadline, driveLi
     (note ? `\n📝 *Note from management:*\n_${note}_\n` : '') +
     `\n📁 *Drive Folder:* ${driveLink}\n\n` +
     `👇 *Tap a button below* to update this task, or reply to this message with *started*, *done*, or *blocked [reason]*.\n` +
+    (code ? `Juggling several tasks? Add the code, e.g. *done ${code}*.\n` : '') +
     `📎 When it's ready, reply here with the *file* — I'll forward it to the owners. Add caption *done* to submit it for review.\n` +
     `Type *help* for all commands.`
   );
@@ -122,16 +181,17 @@ function overdueMessage(tasks) {
 
 function completedTodayMessage(tasks) {
   if (!tasks.length) return 'No tasks completed today yet.';
-  const lines = tasks.map((t) => `• *${taskTitle(t)}* — ${t.editors?.name || 'Unknown'}`);
+  const lines = tasks.map((t) => `• \`${taskCode(t)}\` *${taskTitle(t)}* — ${t.editors?.name || 'Unknown'}`);
   return `✅ *Completed Today* (${tasks.length})\n\n${lines.join('\n')}`;
 }
 
 function editorTaskList(tasks) {
   if (!tasks.length) return '✅ You have no active tasks right now.';
   const lines = tasks.map((t, i) => `*${i + 1}.* ${taskLine(t)}`);
+  const example = taskCode(tasks[0]);
   return (
     `📋 *Your Active Tasks* (${tasks.length})\n\n${lines.join('\n\n')}\n\n` +
-    `_To update one: reply to its assignment message, or type e.g. *done 2* / *started 1* / *blocked 2 [reason]*._`
+    `_To update one: reply to its assignment message, or use its code — e.g. *done ${example}* / *started ${example}* / *blocked ${example} [reason]*. (A number like *done 2* works too.)_`
   );
 }
 
@@ -145,18 +205,18 @@ function dailyDigest(activeTasks, overdueTasks, completedToday) {
 
   if (overdueTasks.length) {
     sections.push(`\n⚠️ *Overdue (${overdueTasks.length}):*`);
-    overdueTasks.forEach((t) => sections.push(`  • ${taskTitle(t)} — ${t.editors?.name || '?'} (due ${fmtDeadline(t.deadline)})`));
+    overdueTasks.forEach((t) => sections.push(`  • \`${taskCode(t)}\` ${taskTitle(t)} — ${t.editors?.name || '?'} (due ${fmtDeadline(t.deadline)})`));
   }
 
   if (completedToday.length) {
     sections.push(`\n✅ *Completed Yesterday/Today (${completedToday.length}):*`);
-    completedToday.forEach((t) => sections.push(`  • ${taskTitle(t)} — ${t.editors?.name || '?'}`));
+    completedToday.forEach((t) => sections.push(`  • \`${taskCode(t)}\` ${taskTitle(t)} — ${t.editors?.name || '?'}`));
   }
 
   const blocked = activeTasks.filter((t) => t.status === 'blocked');
   if (blocked.length) {
     sections.push(`\n🚫 *Blocked (${blocked.length}):*`);
-    blocked.forEach((t) => sections.push(`  • ${taskTitle(t)} — ${t.editors?.name || '?'}${t.blocked_reason ? ': ' + t.blocked_reason : ''}`));
+    blocked.forEach((t) => sections.push(`  • \`${taskCode(t)}\` ${taskTitle(t)} — ${t.editors?.name || '?'}${t.blocked_reason ? ': ' + t.blocked_reason : ''}`));
   }
 
   return sections.join('\n');
@@ -178,6 +238,45 @@ function preDeadlineReminder(task, hoursLeft) {
 // Lower rank = more important; used to sort an editor's task list.
 const PRIORITY_RANK = { urgent: 0, high: 1, normal: 2, low: 3 };
 
+// Sorts an editor's tasks the way the morning card and digest show them:
+// most-important priority first, then nearest deadline.
+function sortTasksForEditor(tasks) {
+  return [...tasks].sort((a, b) => {
+    const pr = (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2);
+    if (pr !== 0) return pr;
+    const ad = a.deadline ? new Date(a.deadline).getTime() : Infinity;
+    const bd = b.deadline ? new Date(b.deadline).getTime() : Infinity;
+    return ad - bd;
+  });
+}
+
+// Compact, scannable morning card for ONE editor — one line per task with a
+// traffic-light dot, its code, and time-left, instead of a multi-line block per
+// task. Cuts the wall-of-text noise editors were getting. Returns null when they
+// have no active tasks so the scheduler can skip them (no "you have 0 tasks" spam).
+function editorDashboardCard(editor, tasks) {
+  if (!tasks || !tasks.length) return null;
+  const sorted = sortTasksForEditor(tasks);
+  const today = new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+  const bar = '━━━━━━━━━━━━━━';
+
+  const lines = sorted.map((t) => {
+    const { dot, when } = deadlineSignal(t.deadline);
+    const rev = t.revision_count ? ' 🔁' : '';
+    const blk = t.status === 'blocked' ? ' 🚫' : '';
+    return `${dot} \`${taskCode(t)}\` ${taskTitle(t)}${rev}${blk} · ${when}`;
+  });
+
+  const example = taskCode(sorted[0]);
+  return (
+    `📋 *Your tasks — ${today}*  (${tasks.length} active)\n` +
+    `${bar}\n` +
+    lines.join('\n') +
+    `\n${bar}\n` +
+    `_Update one:_ *done ${example}* · *started ${example}* · *blocked ${example} reason*`
+  );
+}
+
 // Personalized morning digest for ONE editor. Returns null when they have no
 // active tasks so the scheduler can skip them (no "you have 0 tasks" spam).
 function editorDailyDigest(editor, tasks) {
@@ -186,13 +285,7 @@ function editorDailyDigest(editor, tasks) {
   const endOfToday = new Date();
   endOfToday.setHours(23, 59, 59, 999);
 
-  const sorted = [...tasks].sort((a, b) => {
-    const pr = (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2);
-    if (pr !== 0) return pr;
-    const ad = a.deadline ? new Date(a.deadline).getTime() : Infinity;
-    const bd = b.deadline ? new Date(b.deadline).getTime() : Infinity;
-    return ad - bd;
-  });
+  const sorted = sortTasksForEditor(tasks);
 
   const overdue = sorted.filter((t) => t.deadline && new Date(t.deadline).getTime() < now);
   const dueToday = sorted.filter((t) => {
@@ -209,7 +302,7 @@ function editorDailyDigest(editor, tasks) {
   const lines = sorted.map((t, i) => `*${i + 1}.* ${taskLine(t)}`);
   return (
     `${header}\n\n${lines.join('\n\n')}\n\n` +
-    `_Tap a task's buttons, or reply *done* / *started* / *blocked [reason]* (add its number if you have several)._`
+    `_Tap a task's buttons, or reply *done* / *started* / *blocked [reason]* (add its code if you have several)._`
   );
 }
 
@@ -217,6 +310,7 @@ function helpMenu(isOwner) {
   if (isOwner) {
     return (
       `📖 *Owner Commands*\n\n` +
+      `_Every task has a short code (e.g. \`EDT-A3F2\`) shown in assignment, status and digest messages. You can use it in place of the work name in *mark*, *changes*, *reassign* and *nudge* — handy when names are similar._\n\n` +
       `*new project: [client] | [main work] | [type] | deadline: [date] | priority: [optional] | note: [optional]*\n` +
       `  Types: edit · shoot · graphic designing · data sorting\n` +
       `  Priority: low · normal · high · urgent (defaults to normal)\n` +
@@ -240,10 +334,10 @@ function helpMenu(isOwner) {
   return (
     `📖 *Your Commands*\n\n` +
     `💡 Every task message has *quick buttons* — tap 🔄 Started, ✅ Done, or 🚫 Blocked to update it instantly.\n\n` +
-    `Prefer typing? When you have several tasks, *reply to the assignment message* (or add its number):\n\n` +
-    `*started* / *started 2*\n  → Mark a task as In Progress\n\n` +
-    `*done* / *done 2*\n  → Submit a task for owner review\n\n` +
-    `*blocked [reason]* / *blocked 2 [reason]*\n  → Mark Blocked and alert the owners\n\n` +
+    `Prefer typing? Each task has a short *code* (e.g. \`EDT-A3F2\`) shown on its message and in *my tasks*. When you have several tasks, add the code (or *reply to the assignment message*):\n\n` +
+    `*started* / *started EDT-A3F2*\n  → Mark a task as In Progress\n\n` +
+    `*done* / *done EDT-A3F2*\n  → Submit a task for owner review\n\n` +
+    `*blocked [reason]* / *blocked EDT-A3F2 [reason]*\n  → Mark Blocked and alert the owners\n\n` +
     `📎 *Send a file*\n  → Reply to a task's message with the file and I'll forward it to the owners. Caption it *done* to submit it for review.\n\n` +
     `✅ *Approval*\n  → When you submit work it goes to the owners to *approve* or *request changes* — you'll be notified either way.\n\n` +
     `🔁 *Revisions*\n  → If management asks for changes, the task reopens. Reply to that message with the updated file and *done* to resubmit.\n\n` +
@@ -261,6 +355,10 @@ module.exports = {
   fmtType,
   fmtPriority,
   taskTitle,
+  taskCode,
+  looksLikeTaskCode,
+  matchTaskByCode,
+  deadlineSignal,
   assignmentConfirmationPrompt,
   assignmentNotification,
   teamStatusMessage,
@@ -269,6 +367,7 @@ module.exports = {
   editorTaskList,
   dailyDigest,
   editorDailyDigest,
+  editorDashboardCard,
   preDeadlineReminder,
   helpMenu,
   taskLine,
